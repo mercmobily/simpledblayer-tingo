@@ -1,0 +1,3 @@
+[submodule "lib/simpledblayer"]
+	path = lib/simpledblayer
+	url = https://github.com/mercmobily/simpledblayer.git
