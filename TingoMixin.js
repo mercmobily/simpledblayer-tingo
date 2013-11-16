@@ -21,13 +21,13 @@ var engine = require("tingodb")({})
 var ObjectId = engine.ObjectID.createFromString;
 
 
-//var ObjectId = tingodb.ObjectID;
 
 
 
 var TingoMixin = declare( null, {
 
   projectionHash: {},
+  searchableHash: {},
 
   constructor: function( table, fields ){
 
@@ -35,8 +35,11 @@ var TingoMixin = declare( null, {
 
     // Make up the projectionHash, which is used in pretty much every query 
     self.projectionHash = {};
+    self.searchableHash = {};
     Object.keys( fields ).forEach( function( field ) {
        self.projectionHash[ field ] = true;
+       if( fields[ field ] ) self.searchableHash[ field ] = true;
+
     });
 
     // Make sure that I have `_id: false` in the projection hash (used in all finds)
@@ -47,6 +50,8 @@ var TingoMixin = declare( null, {
     // The solution is to manually delete _id if it's not in self.fields
 
     // if( typeof( fields._id ) === 'undefined' ) this.projectionHash._id = false ;
+
+
 
     // Create self.collection, used by every single query
     self.collection = self.db.collection( self.table );
@@ -59,8 +64,9 @@ var TingoMixin = declare( null, {
   },
 
 
-
   _makeMongoParameters: function( filters ){
+
+    var self = this;
 
     var selector = {}, finalSelector = {};
 
@@ -77,11 +83,15 @@ var TingoMixin = declare( null, {
         filters.conditions[ condition ].forEach( function( fieldObject ){
 
           var field = fieldObject.field;
+          var v = fieldObject.value;
+
+          if( self.searchableHash[ field ] && typeof( fieldObject.value ) === 'string' ){
+            field = '__uc__' + field;
+            v = v.toUpperCase();
+          }
 
           var item = { };
           item[ field ] = {};
-
-          var v = fieldObject.value;
 
           switch( fieldObject.type ){
             case 'lt':
@@ -151,130 +161,6 @@ var TingoMixin = declare( null, {
     var sortHash = filters.sort || {}; 
     return { querySelector: finalSelector, sortHash: sortHash };
   }, 
-
-  select: function( filters, options, cb ){
-
-    var self = this;
-    var saneRanges;
-
-    // Usual drill
-    if( typeof( cb ) === 'undefined' ){
-      cb = options;
-      options = {}
-    } else if( typeof( options ) !== 'object' || options === null ){
-      return cb( new Error("The options parameter must be a non-null object") );
-    }
-
-    
-
-    // Make up parameters from the passed filters
-    try {
-      var mongoParameters = this._makeMongoParameters( filters );
-    } catch( e ){
-      return cb( e );
-    }
-
-    // Actually run the query 
-    var cursor = self.collection.find( mongoParameters.querySelector, self.projectionHash );
-
-    // Sanitise ranges
-    saneRanges = self.sanitizeRanges( filters.ranges );
-
-
-    /*console.log("WTF?");
-    console.log( filters );
-    console.log( mongoParameters.querySelector );
-    console.log( saneRanges );
-    */
-
-    // Skipping/limiting according to ranges/limits
-    if( saneRanges.from != 0 )  cursor.skip( saneRanges.from );
-    if( saneRanges.limit != 0 ) cursor.limit( saneRanges.limit );
-
-    // Sort the query
-    cursor.sort( mongoParameters.sortHash , function( err ){
-      if( err ){
-        next( err );
-      } else {
-
-        if( options.useCursor ){
-
-          cursor.count( { applySkipLimit: true }, function( err, total ){
-
-            cb( null, {
-
-              next: function( done ){
-
-                cursor.nextObject( function( err, obj) {
-                  if( err ){
-                    done( err );
-                  } else {
-
-                    // If options.delete is on, then remove a field straight after fetching it
-                    if( options.delete && obj !== null ){
-                      self.collection.remove( { _id: obj._id }, function( err, howMany ){
-                        if( err ){
-                          done( err );
-                        } else {
-                          done( null, obj );
-                        }
-                      });
-                    } else {
-                       done( null, obj );
-                    }
-                  }
-                });
-              },
-
-              rewind: function( done ){
-                if( options.delete ){
-                  done( new Error("Cannot rewind a cursor with `delete` option on") );
-                } else {
-                  cursor.rewind();
-                  done( null );
-                }
-              },
-              close: function( done ){
-                cursor.close( done );
-              }
-            }, total );
-          })
-
-        } else {
-
-          cursor.toArray( function( err, queryDocs ){
-            if( err ){
-             cb( err );
-            } else {
-              cursor.count( { applySkipLimit: true }, function( err, total ){
-                if( err ){
-                  cb( err );
-                } else {
-
-                  if( options.delete ){
-                    
-                    self.collection.remove( mongoParameters.querySelector, { multi: true }, function( err ){
-                      if( err ){
-                        cb( err );
-                      } else {
-                        cb( null, queryDocs, total );
-                      }
-                    });
-                  } else {
-                    cb( null, queryDocs, total );
-                  }
-                };
-              });
-
-            };
-          })
-
-        }
-      }
-    });
-       
-  },
-
 
   select: function( filters, options, cb ){
 
@@ -413,6 +299,7 @@ var TingoMixin = declare( null, {
 
     var self = this;
     var unsetObject = {};
+    var recordToBeWritten = {};
 
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
@@ -427,12 +314,27 @@ var TingoMixin = declare( null, {
       return cb( new Error("You cannot update _id in MongoDb databases") );
     }
 
-    // if `options.deleteUnsetFields`, Unset any value that is not actually set but IS in the schema,
+    // Copy record over, only for existing fields
+    for( var k in record ){
+      if( typeof( self.fields[ k ] ) !== 'undefined' ) recordToBeWritten[ k ] = record[ k ];
+    }
+
+    // Sets the case-insensitive fields
+    Object.keys( self.searchableHash ).forEach( function( fieldName ){
+      if( self.searchableHash[ fieldName ] ){
+        if( typeof( recordToBeWritten[ fieldName ] ) === 'string' ){
+          recordToBeWritten[ '__uc__' + fieldName ] = recordToBeWritten[ fieldName ].toUpperCase();
+        }
+      }
+    });
+
+
+    // If `options.deleteUnsetFields`, Unset any value that is not actually set but IS in the schema,
     // so that partial PUTs will "overwrite" whole objects rather than
     // just overwriting fields that are _actually_ present in `body`
     if( options.deleteUnsetFields ){
       Object.keys( self.fields ).forEach( function( i ){
-         if( typeof( record[ i ] ) === 'undefined' ) unsetObject[ i ] = 1;
+         if( typeof( recordToBeWritten[ i ] ) === 'undefined' ) unsetObject[ i ] = 1;
       });
     }
 
@@ -445,7 +347,7 @@ var TingoMixin = declare( null, {
 
     // If options.multi is off, then use findAndModify which will accept sort
     if( !options.multi ){
-      self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: record, $unset: unsetObject }, function( err, doc ){
+      self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: recordToBeWritten, $unset: unsetObject }, function( err, doc ){
         if( err ){
           cb( err );
         } else {
@@ -462,7 +364,7 @@ var TingoMixin = declare( null, {
     } else {
 
       // Run the query
-      self.collection.update( mongoParameters.querySelector, { $set: record, $unset: unsetObject }, { multi: true }, cb );
+      self.collection.update( mongoParameters.querySelector, { $set: recordToBeWritten, $unset: unsetObject }, { multi: true }, cb );
     }
 
   },
@@ -483,11 +385,20 @@ var TingoMixin = declare( null, {
 
     // Copy record over, only for existing fields
     for( var k in record ){
-      if( self.fields[ k ] ) recordToBeWritten[ k ] = record[ k ];
+      if( typeof( self.fields[ k ] ) !== 'undefined' ) recordToBeWritten[ k ] = record[ k ];
     }
 
     // Every record in Mongo MUST have an _id field
     if( typeof( recordToBeWritten._id ) === 'undefined' ) recordToBeWritten._id  = ObjectId();
+
+    // Sets the case-insensitive fields
+    Object.keys( self.searchableHash ).forEach( function( fieldName ){
+      if( self.searchableHash[ fieldName ] ){
+        if( typeof( recordToBeWritten[ fieldName ] ) === 'string' ){
+          recordToBeWritten[ '__uc__' + fieldName ] = recordToBeWritten[ fieldName ].toUpperCase();
+        }
+      }
+    });
 
     // Actually run the insert
     self.collection.insert( recordToBeWritten, function( err ){
