@@ -27,6 +27,10 @@ var simpledblayerTests = require( "./lib/simpledblayer/test.js" );
 var tests = simpledblayerTests.get(
 
   function getDbInfo( done ) {
+    
+   // Create the directory
+   require('fs').mkdirSync('/tmp/tests');
+
     var db = new Db('/tmp/tests', {});
     done( null, db, TingoMixin );
   },
