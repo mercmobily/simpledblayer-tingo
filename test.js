@@ -29,7 +29,10 @@ var tests = simpledblayerTests.get(
   function getDbInfo( done ) {
     
    // Create the directory
-   require('fs').mkdirSync('/tmp/tests');
+   try {
+     require('fs').mkdirSync('/tmp/tests');
+   } catch( e ){
+   }
 
     var db = new Db('/tmp/tests', {});
     done( null, db, TingoMixin );
