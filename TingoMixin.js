@@ -116,17 +116,17 @@ var TingoMixin = declare( null, {
             break;
 
             case 'startsWith':
-              item[ field ] = { $regex: new RegExp('^' + v + '.*' ) };
+              item[ field ] = new RegExp('^' + v + '.*' );
             case 'startWith':
             break;
 
             case 'contain':
             case 'contains':
-              item[ field ] = { $regex: new RegExp('.*' + v + '.*' ) };
+              item[ field ] = new RegExp('.*' + v + '.*' );
             break;
 
             case 'endsWith':
-              item[ field ] = { $regex: new RegExp('.*' + v + '$' ) };
+              item[ field ] = new RegExp('.*' + v + '$' );
             case 'endWith':
             break;
 
@@ -183,6 +183,7 @@ var TingoMixin = declare( null, {
     } catch( e ){
       return cb( e );
     }
+
 
     // Actually run the query 
     var cursor = self.collection.find( mongoParameters.querySelector, self.projectionHash );
@@ -478,6 +479,3 @@ TingoMixin.makeId = function( object, cb ){
 exports = module.exports = TingoMixin;
 
 
-
-
-          
