@@ -7,7 +7,7 @@
     "mongo"
   ],
   "main": "TingoMixin.js",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": false,
   "repository": {
     "type": "git",
@@ -20,5 +20,13 @@
     "simpledblayer": "0.3.x",
     "simpledeclare": "0.3.x",
     "tingodb": "0.1.x"
+  },
+  "scripts": {
+    "test": "nodeunit test.js"
+  },
+   "devDependencies": {
+    "simpledeclare": "~0.3.x",
+    "tingodb": "~0.1.x"
   }
+
 }
