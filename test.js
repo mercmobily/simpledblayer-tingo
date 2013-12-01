@@ -16,7 +16,6 @@ var
 
 , TingoMixin = require('./TingoMixin.js')
 
-, mw = require('mongowrapper')
 , async = require('async')
 , Db = require('tingodb')().Db;
 ;

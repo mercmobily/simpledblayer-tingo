@@ -14,14 +14,14 @@ var
   dummy
 
 , declare = require('simpledeclare')
-, tingodb = require('tingodb')({})
+, engine = require("tingodb")({})
 ;
 
-var engine = require("tingodb")({})
-var ObjectId = engine.ObjectID.createFromString;
-
-
-
+// Return the object itself, or a createFromString() version of it
+var ObjectId = function( id ){
+  if( id instanceof engine.ObjectID ) return id;
+  return engine.ObjectID.createFromString( id );
+}
 
 
 var TingoMixin = declare( null, {
@@ -60,7 +60,7 @@ var TingoMixin = declare( null, {
 
   // The default id maker available as an object method
   makeId: function( object, cb ){
-    MongoSchemaMixin.makeId( object, cb );
+    TingoSchemaMixin.makeId( object, cb );
   },
 
 
@@ -175,15 +175,12 @@ var TingoMixin = declare( null, {
       return cb( new Error("The options parameter must be a non-null object") );
     }
 
-    
-
     // Make up parameters from the passed filters
     try {
       var mongoParameters = this._makeMongoParameters( filters );
     } catch( e ){
       return cb( e );
     }
-
 
     // Actually run the query 
     var cursor = self.collection.find( mongoParameters.querySelector, self.projectionHash );
@@ -204,52 +201,65 @@ var TingoMixin = declare( null, {
         if( options.useCursor ){
 
           cursor.count( { applySkipLimit: true }, function( err, total ){
+            if( err ){
+              cb( err );
+            } else {
 
-            cb( null, {
+              cursor.count( function( err, grandTotal ){
+                if( err ){
+                  cb( err );
+                } else {
 
-              next: function( done ){
 
-                cursor.nextObject( function( err, obj) {
-                  if( err ){
-                    done( err );
-                  } else {
-
-                    // If options.delete is on, then remove a field straight after fetching it
-                    if( options.delete && obj !== null ){
-                      self.collection.remove( { _id: obj._id }, function( err, howMany ){
+                  cb( null, {
+      
+                    next: function( done ){
+      
+                      cursor.nextObject( function( err, obj) {
                         if( err ){
                           done( err );
                         } else {
-                          // Artificially delete doc._id if necessary
-                          if( obj !== null && ! self.fields._id ) delete obj._id;
-
-                          done( null, obj );
+      
+                          // If options.delete is on, then remove a field straight after fetching it
+                          if( options.delete && obj !== null ){
+                            self.collection.remove( { _id: obj._id }, function( err, howMany ){
+                              if( err ){
+                                done( err );
+                              } else {
+                                // Artificially delete doc._id if necessary
+                                if( obj !== null && ! self.fields._id ) delete obj._id;
+      
+                                done( null, obj );
+                              }
+                            });
+                          } else {
+      
+                           // Artificially delete doc._id if necessary
+                            if( obj !== null && ! self.fields._id ) delete obj._id;
+      
+                            done( null, obj );
+                          }
                         }
                       });
-                    } else {
-
-                     // Artificially delete doc._id if necessary
-                      if( obj !== null && ! self.fields._id ) delete obj._id;
-
-                      done( null, obj );
+                    },
+      
+                    rewind: function( done ){
+                      if( options.delete ){
+                        done( new Error("Cannot rewind a cursor with `delete` option on") );
+                      } else {
+                        cursor.rewind();
+                        done( null );
+                      }
+                    },
+                    close: function( done ){
+                      cursor.close( done );
                     }
-                  }
-                });
-              },
+                  }, total, grandTotal);
 
-              rewind: function( done ){
-                if( options.delete ){
-                  done( new Error("Cannot rewind a cursor with `delete` option on") );
-                } else {
-                  cursor.rewind();
-                  done( null );
                 }
-              },
-              close: function( done ){
-                cursor.close( done );
-              }
-            }, total);
-
+              });
+  
+            }
           });
 
 
@@ -265,23 +275,33 @@ var TingoMixin = declare( null, {
                 if( doc !== null && ! self.fields._id ) delete doc._id;
               })
 
-              cursor.count( { applySkipLimit: true }, function( err, total ){
+              cursor.count( function( err, grandTotal ){
                 if( err ){
                   cb( err );
                 } else {
 
-                  if( options.delete ){
-                    
-                    self.collection.remove( mongoParameters.querySelector, { multi: true }, function( err ){
-                      if( err ){
-                        cb( err );
+
+                  cursor.count( { applySkipLimit: true }, function( err, total ){
+                    if( err ){
+                      cb( err );
+                    } else {
+
+                      if( options.delete ){
+        
+                        self.collection.remove( mongoParameters.querySelector, { multi: true }, function( err ){
+                          if( err ){
+                            cb( err );
+                          } else {
+                            cb( null, queryDocs, total, grandTotal );
+                          }
+                        });
                       } else {
-                        cb( null, queryDocs, total );
+                        cb( null, queryDocs, total, grandTotal );
                       }
-                    });
-                  } else {
-                    cb( null, queryDocs, total );
-                  }
+
+                    };
+                  });
+
                 };
               });
 
@@ -310,9 +330,9 @@ var TingoMixin = declare( null, {
       return cb( new Error("The options parameter must be a non-null object") );
     }
 
-    // It's Mongo: you cannot update record._id
+    // It's Tingo: you cannot update record._id
     if( typeof( record._id ) !== 'undefined' ){
-      return cb( new Error("You cannot update _id in MongoDb databases") );
+      return cb( new Error("You cannot update _id in TingoDb databases") );
     }
 
     // Copy record over, only for existing fields
