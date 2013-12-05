@@ -46,12 +46,7 @@ var TingoMixin = declare( null, {
     // if `_id` is not explicitely defined in the schema.
     // in "inclusive projections" in mongoDb, _id is added automatically and it needs to be
     // explicitely excluded (it is, in fact, the ONLY field that can be excluded in an inclusive projection)
-    // FIXME: Taken this out of the picture, as _id is important when inserting and you want to re-fetch the doc
-    // The solution is to manually delete _id if it's not in self.fields
-
     // if( typeof( fields._id ) === 'undefined' ) this.projectionHash._id = false ;
-
-
 
     // Create self.collection, used by every single query
     self.collection = self.db.collection( self.table );
@@ -84,6 +79,12 @@ var TingoMixin = declare( null, {
 
           var field = fieldObject.field;
           var v = fieldObject.value;
+
+
+          // If a search is attempted on a non-searchable field, will throw
+          if( !self.searchableHash[ field ] ){
+            throw( new Error("Field " + field + " is not searchable" ) );
+          }
 
           if( self.searchableHash[ field ] && typeof( fieldObject.value ) === 'string' ){
             field = '__uc__' + field;
@@ -141,20 +142,29 @@ var TingoMixin = declare( null, {
  
       });
 
-      // Clean up selector, as Mongo doesn't like empty arrays for selectors
-      if( selector[ '$and' ].length == 0 ){
-        finalSelector[ '$or' ] = selector[ '$or' ];
+      // Assign the `finalSelector` variable. Note that the final result can be:
+      // * Just $and conditions: { '$and': [ this, that, other ] }
+      // * Just $or conditions : { '$or': [ this, that, other ] }
+      // * $and conditions with $or: { '$and': [ this, that, other, { '$or': [ blah, bleh, bligh ] } ] }
+
+
+      // No `$and` conditions...
+      if( selector[ '$and' ].length === 0 ){
+        // ...maybe there are `or` ones, which will get returned
+        if( selector[ '$or' ].length !== 0 ) finalSelector[ '$or' ] = selector[ '$or' ];
+
+      // There are `$and` conditions: assign them...
       } else {
         finalSelector[ '$and' ] = selector[ '$and' ];
 
+        // ...and shove the `$or` ones in there as one of them
         if( selector[ '$or' ].length !== 0 ){
           finalSelector[ '$and' ].push( { '$or': selector[ '$or' ] } );
         }
-        //console.log( "FINAL SELECTOR" );        
-        //console.log( require('util').inspect( finalSelector, { depth: 10 } ) );        
 
       }
-
+      // console.log( "FINAL SELECTOR" );        
+      // console.log( require('util').inspect( finalSelector, { depth: 10 } ) );        
 
     };    
 
@@ -185,8 +195,8 @@ var TingoMixin = declare( null, {
     // Actually run the query 
     var cursor = self.collection.find( mongoParameters.querySelector, self.projectionHash );
 
-    // Sanitise ranges
-    saneRanges = self.sanitizeRanges( filters.ranges );
+    // Sanitise ranges if this is NOT a cursor query
+    saneRanges = self.sanitizeRanges( filters.ranges, ! options.useCursor );
 
     // Skipping/limiting according to ranges/limits
     if( saneRanges.from != 0 )  cursor.skip( saneRanges.from );
@@ -200,16 +210,15 @@ var TingoMixin = declare( null, {
 
         if( options.useCursor ){
 
-          cursor.count( { applySkipLimit: true }, function( err, total ){
+          cursor.count( function( err, grandTotal ){
             if( err ){
               cb( err );
             } else {
 
-              cursor.count( function( err, grandTotal ){
+              cursor.count( { applySkipLimit: true }, function( err, total ){
                 if( err ){
                   cb( err );
                 } else {
-
 
                   cb( null, {
       
@@ -226,17 +235,14 @@ var TingoMixin = declare( null, {
                               if( err ){
                                 done( err );
                               } else {
-                                // Artificially delete doc._id if necessary
-                                if( obj !== null && ! self.fields._id ) delete obj._id;
-      
+
+                                if( typeof( fields._id ) === 'undefined' )  delete obj._id;
                                 done( null, obj );
                               }
                             });
                           } else {
-      
-                           // Artificially delete doc._id if necessary
-                            if( obj !== null && ! self.fields._id ) delete obj._id;
-      
+ 
+                            if( obj !== null && typeof( fields._id ) === 'undefined' )  delete obj._id;
                             done( null, obj );
                           }
                         }
@@ -254,14 +260,13 @@ var TingoMixin = declare( null, {
                     close: function( done ){
                       cursor.close( done );
                     }
-                  }, total, grandTotal);
+                  }, total, grandTotal );
 
                 }
               });
   
             }
           });
-
 
         } else {
 
@@ -270,34 +275,34 @@ var TingoMixin = declare( null, {
              cb( err );
             } else {
 
-              // Artificially delete doc._id if necessary
-              queryDocs.forEach( function( doc ){
-                if( doc !== null && ! self.fields._id ) delete doc._id;
-              })
-
               cursor.count( function( err, grandTotal ){
                 if( err ){
                   cb( err );
                 } else {
-
 
                   cursor.count( { applySkipLimit: true }, function( err, total ){
                     if( err ){
                       cb( err );
                     } else {
 
+                      // Cycle to work out the toDelete array _and_ get rid of the _id_
+                      // from the resultset
+                      var toDelete = [];
+                      queryDocs.forEach( function( doc ){
+                        if( options.delete ) toDelete.push( doc._id );
+                        if( typeof( self.fields._id ) === 'undefined' ) delete doc._id;
+                      });
+
+                      // If it was a delete, delete each record
+                      // Note that there is no check whether the delete worked or not
                       if( options.delete ){
-        
-                        self.collection.remove( mongoParameters.querySelector, { multi: true }, function( err ){
-                          if( err ){
-                            cb( err );
-                          } else {
-                            cb( null, queryDocs, total, grandTotal );
-                          }
+                        toDelete.forEach( function( _id ){
+                          self.collection.remove( { _id: _id }, function( err ){ } );
                         });
-                      } else {
-                        cb( null, queryDocs, total, grandTotal );
                       }
+
+                      // That's all!
+                      cb( null, queryDocs, total, grandTotal );
 
                     };
                   });
@@ -315,7 +320,6 @@ var TingoMixin = declare( null, {
   },
 
 
-
   update: function( filters, record, options, cb ){
 
     var self = this;
@@ -330,14 +334,9 @@ var TingoMixin = declare( null, {
       return cb( new Error("The options parameter must be a non-null object") );
     }
 
-    // It's Tingo: you cannot update record._id
-    if( typeof( record._id ) !== 'undefined' ){
-      return cb( new Error("You cannot update _id in TingoDb databases") );
-    }
-
     // Copy record over, only for existing fields
     for( var k in record ){
-      if( typeof( self.fields[ k ] ) !== 'undefined' ) recordToBeWritten[ k ] = record[ k ];
+      if( typeof( self.fields[ k ] ) !== 'undefined' && k !== '_id' ) recordToBeWritten[ k ] = record[ k ];
     }
 
     // Sets the case-insensitive fields
@@ -355,7 +354,7 @@ var TingoMixin = declare( null, {
     // just overwriting fields that are _actually_ present in `body`
     if( options.deleteUnsetFields ){
       Object.keys( self.fields ).forEach( function( i ){
-         if( typeof( recordToBeWritten[ i ] ) === 'undefined' ) unsetObject[ i ] = 1;
+         if( typeof( recordToBeWritten[ i ] ) === 'undefined' && i !== '_id' ) unsetObject[ i ] = 1;
       });
     }
 
@@ -435,9 +434,7 @@ var TingoMixin = declare( null, {
               cb( err );
             } else { 
 
-              // Artificially delete doc._id if necessary
-              if( doc !== null && ! self.fields._id ) delete doc._id;
-
+              if( doc !== null && typeof( self.fields._id ) === 'undefined' ) delete doc._id;
               cb( null, doc );
             }
           });
@@ -493,7 +490,11 @@ var TingoMixin = declare( null, {
 
 // The default id maker
 TingoMixin.makeId = function( object, cb ){
-  cb( null, ObjectId() );
+  if( object === null ){
+    cb( null, ObjectId() );
+  } else {
+    cb( null, ObjectId( object ) );
+  }
 },
 
 exports = module.exports = TingoMixin;
