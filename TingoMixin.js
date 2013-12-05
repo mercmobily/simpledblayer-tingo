@@ -236,13 +236,13 @@ var TingoMixin = declare( null, {
                                 done( err );
                               } else {
 
-                                if( typeof( fields._id ) === 'undefined' )  delete obj._id;
+                                if( typeof( self.fields._id ) === 'undefined' )  delete obj._id;
                                 done( null, obj );
                               }
                             });
                           } else {
  
-                            if( obj !== null && typeof( fields._id ) === 'undefined' )  delete obj._id;
+                            if( obj !== null && typeof( self.fields._id ) === 'undefined' )  delete obj._id;
                             done( null, obj );
                           }
                         }
