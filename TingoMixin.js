@@ -487,12 +487,10 @@ var TingoMixin = declare( null, {
   },
 
 
-
-
-  reposition: function( positionField, idProperty, id, moveBeforeId, cb ){
+  relocation: function( positionField, idProperty, id, moveBeforeId, cb ){
 
     function moveElement(array, from, to) {
-      array.splice( to > from ? --to : to, 0, array.splice(from, 1)[0]);
+      if( to !== from ) array.splice( to, 0, array.splice(from, 1)[0]);
     }
 
     var self = this;
@@ -510,7 +508,7 @@ var TingoMixin = declare( null, {
       data.forEach( function( a, i ){ if( a[ idProperty ].toString() == id.toString() ) from = i; } );
       //console.log("MOVE BEFORE ID: ", moveBeforeId, typeof( moveBeforeId )  );
       if( typeof( moveBeforeId ) === 'undefined' || moveBeforeId === null ){
-        to = data.length + 1;
+        to = data.length;
         //console.log( "LENGTH OF DATA: " , data.length );
       } else {
         //console.log("I AM HERE?!?!? ");
@@ -519,10 +517,10 @@ var TingoMixin = declare( null, {
 
       //console.log("from: ", from, ", to: ", to );
 
-      if( from === to ) return;
-
       if( typeof( from ) !== 'undefined' && typeof( to ) !== 'undefined' ){
         //console.log("SWAPPINGGGGGGGGGGGGGG...");
+
+        if( to > from ) to --;
         moveElement( data, from, to);
       }
 
