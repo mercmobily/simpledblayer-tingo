@@ -41,7 +41,6 @@ var TingoMixin = declare( null, {
         self.projectionHash[ field ] = true;
         if( fields[ field ] ) self.searchableHash[ field ] = true;
       }
-
     });
 
     // Make sure that I have `_id: false` in the projection hash (used in all finds)
@@ -196,9 +195,11 @@ var TingoMixin = declare( null, {
 
     // Actually run the query 
     var cursor = self.collection.find( mongoParameters.querySelector, self.projectionHash );
+    //console.log("FIND IN SELECT: ",  mongoParameters.querySelector, self.projectionHash );
 
-    // Sanitise ranges if this is NOT a cursor query
-    saneRanges = self.sanitizeRanges( filters.ranges, ! options.useCursor );
+    // Sanitise ranges. If it's a cursor query, or if the option skipHardLimitOnQueries is on,
+    // then will pass true (that is, the skipHardLimitOnQueries parameter will be true )
+    saneRanges = self.sanitizeRanges( filters.ranges, options.useCursor || options.skipHardLimitOnQueries );
 
     // Skipping/limiting according to ranges/limits
     if( saneRanges.from != 0 )  cursor.skip( saneRanges.from );
@@ -243,7 +244,7 @@ var TingoMixin = declare( null, {
                               }
                             });
                           } else {
- 
+
                             if( obj !== null && typeof( self.fields._id ) === 'undefined' )  delete obj._id;
                             done( null, obj );
                           }
@@ -266,7 +267,7 @@ var TingoMixin = declare( null, {
 
                 }
               });
-  
+
             }
           });
 
@@ -281,6 +282,7 @@ var TingoMixin = declare( null, {
                 if( err ){
                   cb( err );
                 } else {
+
                   cursor.count( { applySkipLimit: true }, function( err, total ){
                     if( err ){
                       cb( err );
@@ -348,7 +350,6 @@ var TingoMixin = declare( null, {
         }
       }
     });
-
 
     // If `options.deleteUnsetFields`, Unset any value that is not actually set but IS in the schema,
     // so that partial PUTs will "overwrite" whole objects rather than
@@ -433,7 +434,7 @@ var TingoMixin = declare( null, {
           self.collection.findOne( { _id: recordToBeWritten._id }, self.projectionHash, function( err, doc ){
             if( err ){
               cb( err );
-            } else { 
+            } else {
 
               if( doc !== null && typeof( self.fields._id ) === 'undefined' ) delete doc._id;
               cb( null, doc );
@@ -486,8 +487,7 @@ var TingoMixin = declare( null, {
 
   },
 
-
-  relocation: function( positionField, idProperty, id, moveBeforeId, cb ){
+  relocation: function( positionField, idProperty, id, moveBeforeId, conditionsHash, cb ){
 
     function moveElement(array, from, to) {
       if( to !== from ) array.splice( to, 0, array.splice(from, 1)[0]);
@@ -495,12 +495,15 @@ var TingoMixin = declare( null, {
 
     var self = this;
 
+    // Sane value to filterHash
+    if( typeof( conditionsHash ) === 'undefined' || conditionsHash === null ) conditionsHash = {};
+
     //console.log("REPOSITIONING BASING IT ON ", positionField, "IDPROPERTY: ", idProperty, "ID: ", id, "TO GO AFTER:", moveBeforeId );
 
     // Case #1: Change moveBeforeId
     var sortParams = { };
     sortParams[ positionField ] = 1;
-    self.select( { sort: sortParams }, function( err, data ){
+    self.select( { sort: sortParams, conditions: conditionsHash }, { skipHardLimitOnQueries: true }, function( err, data ){
       if( err ) return cb( err );
       //console.log("DATA BEFORE: ", data );
 
@@ -511,7 +514,7 @@ var TingoMixin = declare( null, {
         to = data.length;
         //console.log( "LENGTH OF DATA: " , data.length );
       } else {
-        //console.log("I AM HERE?!?!? ");
+        //console.log("MOVE BEFORE ID WAS PASSED, LOOKING FOR ITEM BY HAND...");
         data.forEach( function( a, i ){ if( a[ idProperty ].toString() == moveBeforeId.toString() ) to = i; } );
       }
 
