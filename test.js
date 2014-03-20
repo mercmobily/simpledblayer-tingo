@@ -13,6 +13,8 @@ var
   dummy
 
 , declare = require('simpledeclare')
+, SimpleSchema = require('simpleschema')
+, SimpleSchemaMongo = require('simpleschema-mongo')
 
 , TingoMixin = require('./TingoMixin.js')
 
@@ -20,6 +22,8 @@ var
 , Db = require('tingodb')().Db;
 ;
 
+
+var SchemaMixin = declare( [ SimpleSchema, SimpleSchemaMongo ] );
 
 var simpledblayerTests = require( "./lib/simpledblayer/test.js" );
 
@@ -34,7 +38,8 @@ var tests = simpledblayerTests.get(
    }
 
     var db = new Db('/tmp/tests', {});
-    done( null, db, TingoMixin );
+    //done( null, db, SchemaMixin, TingoMixin );
+    done( null, db, SimpleSchema, TingoMixin );
   },
 
   function closeDb( db, done ) {
