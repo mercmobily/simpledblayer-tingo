@@ -24,10 +24,10 @@ var ObjectId = function( id ){
   return engine.ObjectID.createFromString( id );
 }
 
+
 var consolelog = function(){
   //console.log.apply( console, arguments );
 }
-
 
 var TingoMixin = declare( null, {
 
@@ -48,7 +48,7 @@ var TingoMixin = declare( null, {
     Object.keys( self.schema.structure ).forEach( function( field ) {
       var entry = self.schema.structure[ field ];
       self._fieldsHash[ field ] = true;
-			if( ! entry.skipProjection ) self._projectionHash[ field ] = true;
+      if( ! entry.skipProjection ) self._projectionHash[ field ] = true;
     });
 
     // Create self.collection, used by every single query
@@ -63,7 +63,7 @@ var TingoMixin = declare( null, {
 
   // Make parameters for queries. It's the equivalent of what would be
   // an SQL creator for a SQL layer
-  _makeMongoParameters: function( filters, fieldPrefix ){
+  _makeTingoParameters: function( filters, fieldPrefix ){
 
     var self = this;
 
@@ -110,7 +110,7 @@ var TingoMixin = declare( null, {
           // If there are ".", then some children records are being referenced.
           // The actual way they are placed in the record is in _children; so,
           // add _children where needed.
-          field = self._makeMongoFieldPath( field );
+          field = self._makeTingoFieldPath( field );
 
           // Make up item. Note that any search will be based on _searchData
           var item = { };
@@ -185,7 +185,8 @@ var TingoMixin = declare( null, {
 
       }
       consolelog( "FINAL SELECTOR" );        
-      //consolelog( require('util').inspect( finalSelector, { depth: 10 } ) );        
+      consolelog( require('util').inspect( finalSelector, { depth: 10 } ) );        
+      consolelog( this.table );
     };    
 
     // make sortHash
@@ -194,14 +195,15 @@ var TingoMixin = declare( null, {
     var sortHash = {};
 
     consolelog( "filters.sort is:", filters.sort );        
-    consolelog( "_sortableHash is:", self._sortableHash );        
+    //consolelog( "_sortableHash is:", self._sortableHash );        
     for( var field  in filters.sort ) {
       var sortDirection = filters.sort[ field ]
 
-      if( self._sortableHash[ field ] ){
+      //if( self._sortableHash[ field ] || field === self.positionField ){
+      if( self._searchableHash[ field ] || field === self.positionField ){
 
-        field = self._makeMongoFieldPath( field );
-        if( self._sortableHash[ field ] === 'upperCase' ){
+        field = self._makeTingoFieldPath( field );
+        if( self._searchableHash[ field ] === 'upperCase' ){
           field = self._addUcPrefixToPath( field );
         }
 
@@ -217,6 +219,7 @@ var TingoMixin = declare( null, {
  
   select: function( filters, options, cb ){
 
+
     var self = this;
     var saneRanges;
 
@@ -230,13 +233,18 @@ var TingoMixin = declare( null, {
 
     // Make up parameters from the passed filters
     try {
-      var mongoParameters = this._makeMongoParameters( filters );
+      var mongoParameters = this._makeTingoParameters( filters );
     } catch( e ){
       return cb( e );
     }
 
     // If sortHash is empty, AND there is a self.positionField, then sort
     // by the element's position
+    consolelog("TABLE:", self.table );
+    consolelog("SORT HASH", mongoParameters.sortHash );
+    consolelog( Object.keys( mongoParameters.sortHash ).length );
+    consolelog( self.positionField );
+
     if( Object.keys( mongoParameters.sortHash ).length === 0 && self.positionField ){
       mongoParameters.sortHash[ self.positionField ] = 1;
     }
@@ -254,6 +262,7 @@ var TingoMixin = declare( null, {
 
 
     consolelog("PH: ", mongoParameters.querySelector, projectionHash );
+    consolelog("TABLE: ", self.table );
 
     // Actually run the query 
     var cursor = self.collection.find( mongoParameters.querySelector, projectionHash );
@@ -370,6 +379,7 @@ var TingoMixin = declare( null, {
           });
 
         } else {
+
 
           cursor.toArray( function( err, queryDocs ){
             if( err ){
@@ -528,10 +538,12 @@ var TingoMixin = declare( null, {
 
       // Make up parameters from the passed filters
       try {
-        var mongoParameters = self._makeMongoParameters( filters );
+        var mongoParameters = self._makeTingoParameters( filters );
       } catch( e ){
         return cb( e );
       }
+
+      
 
       consolelog( rnd, "About to update. At this point, updateObject is:", updateObject );
       consolelog( rnd, "Selector:", mongoParameters.querySelector );
@@ -543,8 +555,6 @@ var TingoMixin = declare( null, {
 
         // If options.multi is off, then use findAndModify which will accept sort
         if( !options.multi ){
-
-          console.log("DEBUG:", mongoParameters.querySelector, mongoParameters.sortHash, updateObjectWithLookups );
 
           self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: updateObjectWithLookups, $unset: unsetObject }, function( err, doc ){
             if( err ) return cb( err );
@@ -635,7 +645,7 @@ var TingoMixin = declare( null, {
      
         consolelog( rnd, "recordWithLookups is:", recordWithLookups);
 
-        // Every record in Mongo MUST have an _id field. Note that I do this here
+        // Every record in Tingo MUST have an _id field. Note that I do this here
         // so that record doesn't include an _id field when self._makeRecordWithLookups
         // is called (which would imply that $pushed, non-main children elements would also
         // have _id
@@ -647,21 +657,17 @@ var TingoMixin = declare( null, {
         self.collection.insert( recordWithLookups, function( err ){
           if( err ) return cb( err );
 
-          self.position( recordWithLookups, options.beforeId ? options.beforeId : null, function( err ){
+          self._updateParentsRecords( { op: 'insert', record: record }, function( err ){
             if( err ) return cb( err );
 
-            self._updateParentsRecords( { op: 'insert', record: record }, function( err ){
+            if( ! options.returnRecord ) return cb( null );
+
+            self.collection.findOne( { _id: recordWithLookups._id }, self._projectionHash, function( err, doc ){
               if( err ) return cb( err );
 
-              if( ! options.returnRecord ) return cb( null );
+              if( doc !== null && typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
 
-              self.collection.findOne( { _id: recordWithLookups._id }, self._projectionHash, function( err, doc ){
-                if( err ) return cb( err );
-
-                if( doc !== null && typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
-
-                cb( null, doc );
-              });
+              cb( null, doc );
             });
           });
         });
@@ -688,7 +694,7 @@ var TingoMixin = declare( null, {
 
     // Run the query
     try { 
-      var mongoParameters = this._makeMongoParameters( filters );
+      var mongoParameters = this._makeTingoParameters( filters );
     } catch( e ){
       return cb( e );
     }
@@ -726,7 +732,22 @@ var TingoMixin = declare( null, {
 
   },
 
-  position: function( record, moveBeforeId, cb ){
+  reposition: function( record, moveBeforeId, cb ){
+
+
+    // No position field: nothing to do
+    if( ! this.positionField ){
+       consolelog("No positionField for this table:", this.table );
+       return cb( null );
+    }
+
+    // moveBeforeId is 
+    if( typeof( moveBeforeId ) === 'undefined' ){
+       consolelog("beforeId is undefined, skipping repositioning" );
+       return cb( null );
+    }
+
+    consolelog("Repositioning:", record );
 
     function moveElement(array, from, to) {
       if( to !== from ) array.splice( to, 0, array.splice(from, 1)[0]);
@@ -741,16 +762,6 @@ var TingoMixin = declare( null, {
 
     var updateCalls = [];
 
-
-    //consolelog("REPOSITIONING RUN");
-
-    // No position field: nothing to do
-    if( !positionField ){
-       //consolelog("No positionField for this table, not repositioning... ");
-       return cb( null );
-    }
-    //consolelog("YES POSITION FIELD");
-    
     // Make up conditionsHash based on the positionBase array
     var conditionsHash = { and: [] };
     for( var i = 0, l = self.positionBase.length -1; i < l; i ++ ){
@@ -758,7 +769,7 @@ var TingoMixin = declare( null, {
       conditionsHash.and.push( { field: positionBaseField, type: 'eq', value: record[ positionBaseField ] } );
     }
 
-    //consolelog("REPOSITIONING BASING IT ON ", positionField, "IDPROPERTY: ", idProperty, "ID: ", id, "TO GO AFTER:", moveBeforeId );
+    consolelog("Repositioning basing it on", positionField, "idProperty: ", idProperty, "id: ", id, "to go after:", moveBeforeId );
 
     // Run the select, ordered by the positionField and satisfying the positionBase
     var sortParams = { };
@@ -766,43 +777,43 @@ var TingoMixin = declare( null, {
     self.select( { sort: sortParams, conditions: conditionsHash }, { skipHardLimitOnQueries: true }, function( err, data ){
       if( err ) return cb( err );
 
-      //consolelog("DATA BEFORE: ", data );
+      consolelog("Data before: ", data );
       
       // Working out `from` and `to` as positional numbers
       var from, to;
       data.forEach( function( a, i ){ if( a[ idProperty ].toString() == id.toString() ) from = i; } );
-      //consolelog("MOVE BEFORE ID: ", moveBeforeId, typeof( moveBeforeId )  );
+      consolelog("Move before ID: ", moveBeforeId, typeof( moveBeforeId )  );
       if( typeof( moveBeforeId ) === 'undefined' || moveBeforeId === null ){
+        consolelog( "moveBeforeId was null, 'to' will be:" , data.length );
         to = data.length;
-        //consolelog( "LENGTH OF DATA: " , data.length );
       } else {
-        //consolelog("MOVE BEFORE ID WAS PASSED, LOOKING FOR ITEM BY HAND...");
+        consolelog("moveBeforeId was passed, looking for item...");
         data.forEach( function( a, i ){ if( a[ idProperty ].toString() == moveBeforeId.toString() ) to = i; } );
       }
 
-      //consolelog("from: ", from, ", to: ", to );
+      consolelog("from: ", from, ", to: ", to );
 
       // Actually move the elements
       if( typeof( from ) !== 'undefined' && typeof( to ) !== 'undefined' ){
-        //consolelog("SWAPPINGGGGGGGGGGGGGG...");
+        consolelog("Swapping!!!");
 
         if( to > from ) to --;
         moveElement( data, from, to);
 
-        //consolelog("DATA AFTER: ", data );
+        consolelog("Data after: ", data );
 
         // Actually change the values on the DB so that they have the right order
         var updateCalls = [];
         data.forEach( function( item, i ){
 
-          //consolelog("Item: ", item, i );
+          consolelog("Item: ", item, i );
           var updateTo = {};
           updateTo[ positionField ] = i + 100;
 
           updateCalls.push( function( cb ){
             var mongoSelector = {};
             mongoSelector[ idProperty ] = item[ idProperty ];
-            //consolelog("UPDATING...", mongoSelector, { $set: updateTo } );
+            consolelog("Updating...", mongoSelector, { $set: updateTo } );
             self.collection.update( mongoSelector, { $set: updateTo }, cb );
           });
 
@@ -821,6 +832,18 @@ var TingoMixin = declare( null, {
     });     
     
 
+  },
+
+  dropIndex: function( name, cb ){
+
+    this.collection.dropIndex( name );
+
+    // The mongo call is synchronous, call callback manually
+    cb( null );
+  },
+    
+  dropAllIndexes: function( done ){
+    this.collection.dropAllIndexes( done );
   },
 
   makeIndex: function( keys, name, options, cb ){
@@ -847,116 +870,117 @@ var TingoMixin = declare( null, {
   // Make all indexes based on the schema
   // Options can have:
   //   `{ background: true }`, which will make sure makeIndex is called with { background: true }
+  //
+  // NOTE TO Db Layer DEVELOPERS USING THIS AS A TEMPLATE:
+  // I used the _indexGroups variable as mongoDB requires very specific indexing (each record "contains"
+  // its children directly, and the children's fields also need to be indexed within the parent).
+  // In normal circumstances, just scan the layer's schema for anything `searchable`.
 
-  makeAllIndexes: function( options, cb ){
+  generateSchemaIndexes: function( options, cb ){
 
     var self = this;
     var indexMakers = [];
-    var autoNumber = 0;
 
     var opt = {};
-    if( options.background ) opt.background = true;
+    if( options.background ) opt.background = false;
 
-    consolelog("Run makeAllIndexes for table", self.table );
+    consolelog("Run generateSchemaIndexes for table", self.table );
 
-    consolelog("SEARCHABLE AND INDEXES:");
-    consolelog(self._searchableHash );
-    consolelog(self._permutationGroups );
+    /*
 
-    // Add permutations to indexes
-    Object.keys( self._permutationGroups ).forEach( function( f ){
+     Go through all of the index groups for this table.
+     Assume you have schemas as follows:
 
-      var permutationEntry = self._permutationGroups[ f ];
+     people = declare( DbLayer, {
 
-      var prefixes = [];
-      var fields = [];
-      
-      Object.keys( permutationEntry.prefixes ).forEach( function( prefix ){
-        var entryValue = permutationEntry.prefixes[ prefix ];
-        prefix = self._makeMongoFieldPath( prefix );
-        
+       schema: new Schema({
+         workspaceId: { type: 'id', searchable: true },
+         id:          { type: 'id', searchable: true },
+         name:        { type: 'string', searchable: true },
+         surname:     { type: 'string', searchable: true },
+         age:         { type: 'number', searchable: true, sortable: true },
+       }),
+
+     });
+       
+     emails = declare( DbLayer, {
+
+       schema: new Schema({
+         workspaceId: { type: 'id', searchable; true },
+         id:          { type: 'id', searchable: true },
+         personId:    { type: 'id', searchable: true },
+         email:       { type: 'string', searchable: true },
+         active:      { type: 'boolean', searchable: true },
+         notes:       { type: 'string' }
+       }),
+
+     });
+
+     Also assume that `emails` is nested to `people`.
+
+     The end result will be:
+
+     // peopleSchema
+
+     _indexGroups = {
+       __main: {
+         searchable: { workspaceId: true, id: true, name: true, surname: true, age: true },
+       },
+
+       __emails: {
+         searchable: { workspaceId: true, id: true, personId: true, email: true, active: true },
+       }
+     }
+    */
+
+    consolelog("indexGroups for: ", self.table );
+    consolelog(self._indexGroups );
+
+    // Go through each group
+    Object.keys( self._indexGroups ).forEach( function( group ){
+
+      var indexGroup = self._indexGroups[ group ];
+
+      consolelog("Dealing with group: ", group );
+
+      // Sets the field prefix. For __main, it's empty.
+      fieldPrefix = group === '__main' ? '' : group + '.';
+
+      consolelog("fieldPrefix:", fieldPrefix );
+
+      // Go through `searchable` values. For each one,
+      // add the index.
+
+      Object.keys( indexGroup.searchable ).forEach( function( searchable ){
+
+        consolelog("Searchable field:", searchable );
+
+        var entryValue = indexGroup.searchable[ searchable ];
+        consolelog("Entry valu:", entryValue );
+
+        // Add the __uc prefix (if necessary), as well as the
+        // path prefix (in case it's not __main)
         if( entryValue === 'upperCase' ){
-          prefix = self._addUcPrefixToPath( prefix );
+          searchable = self._addUcPrefixToPath( searchable );
         }
-        prefixes.push( prefix );
-      });
+        searchable = fieldPrefix + searchable;
 
-      Object.keys( permutationEntry.fields ).forEach( function( field ){
-        var entryValue = permutationEntry.fields[ field ];
-        field = self._makeMongoFieldPath( field );
-        
-        if( entryValue === 'upperCase' ){
-          field = self._addUcPrefixToPath( field );
-        }
-        fields.push( field );
-      });
+        // Turn it into a proper field path (it will only affect fields with "." in them)
+        searchable = self._makeTingoFieldPath( searchable );
 
-      consolelog( "RESULT FOR", f );
-      consolelog( prefixes );
-      consolelog( fields );
+        var indexKeys = {};
 
-      consolelog( "KEYS:" );
-      self._permute( fields ).forEach( function( combination ){
-
-
-        var keys = {};
-
-        for( var i = 0; i < prefixes.length; i ++ ) keys[ prefixes[ i ]  ] = 1;
-        for( var i = 0; i < combination.length; i ++ ) keys[ combination[ i ]  ] = 1;
-        
-        consolelog( keys );
-
-        // Adds this index maker to the list
+        // Adding index maker for the straight search
+        indexKeys[ searchable ] = 1;
         indexMakers.push( function( cb ){
-          consolelog("Running makeIndex with keys:", keys );
-          self.makeIndex( keys, 'autoPermuted-' + autoNumber, opt, cb );
-          autoNumber ++;
+          consolelog("Running makeIndex for table/keys:", self.table, indexKeys );
+          self.makeIndex( indexKeys, null, opt, cb );
         });
 
       });
     });
 
-    // Add individual searchable fields to indexes
-    Object.keys( self._searchableHash ).forEach( function( field ){
-      var keys = {};
 
-      var entryValue = self._searchableHash[ field ];
-
-      var originalField = field;
-      field = self._makeMongoFieldPath( field );
-        
-      if( entryValue === 'upperCase' ){
-        field = self._addUcPrefixToPath( field );
-      }
-
-      keys[ field ] = 1;
-          
-      // If it's the idProperty field, then make it unique
-      if( originalField === self.idProperty ){
-
-        indexMakers.push( function( cb ){
-          consolelog("FIELD", field, "IS idParam, making it unique!");
-          var opt2 = {};
-          opt2.background = !!opt.background;
-          opt2.unique = true;
-          self.makeIndex( keys, null, opt2, cb );
-        });
-
-      // Just a normal index
-      } else {
-
-        indexMakers.push( function( cb ){
-          consolelog("FIELD", field, "is a normal index");
-          self.makeIndex( keys, null, opt, cb );
-        });
-
-      }
-
-      consolelog("SINGLE KEYS FOR", self.table );
-      consolelog( keys );
-    });
-
-    
     // Add index for positionField, keeping into account positionBaseField
     var keys = {};
     self.positionBase.forEach( function( positionBaseField ){
@@ -973,12 +997,6 @@ var TingoMixin = declare( null, {
   },
 
 
-  dropAllIndexes: function( done ){
-    this.collection.dropAllIndexes( done );
-  },
-
-
-
   // ******************************************************************
   // ******************************************************************
   // ****              MONGO-SPECIFIC FUNCTIONS                    ****
@@ -987,7 +1005,7 @@ var TingoMixin = declare( null, {
   // **** These functions are here to address mongoDb's lack of    ****
   // **** joins by manipulating records' contents when a parent    ****
   // **** record is added, as well as helper functions for         ****
-  // **** the lack, in MongoDB, of case-independent searches.      ****
+  // **** the lack, in TingoDB, of case-independent searches.      ****
   // ****                                                          ****
   // **** For lack of  case-insensitive search, the layer creates  ****
   // **** __uc__ fields that are uppercase equivalent of 'string'  ****
@@ -999,7 +1017,7 @@ var TingoMixin = declare( null, {
   // **** array in _children updated with the new email address    ****
   // **** added. This means that when fetching records, you        ****
   // **** _automatically_ and _immediately_ have its children      ****
-  // **** loaded. It also means that it's possible, in MongoDb,    ****
+  // **** loaded. It also means that it's possible, in TingoDb,    ****
   // **** to search for fields in the direct children              ****
   // **** I took great care at moving these functions here         ****
   // **** because these are the functions that developers of       ****
@@ -1048,7 +1066,7 @@ var TingoMixin = declare( null, {
   // If there are ".", then some children records are being referenced.
   // The actual way they are placed in the record is in _children; so,
   // add _children where needed.
-  _makeMongoFieldPath: function( s ){
+  _makeTingoFieldPath: function( s ){
 
     if( s.match(/\./ ) ){
 
@@ -1482,9 +1500,10 @@ var TingoMixin = declare( null, {
             }
 
             var selector = {};
-            selector[ '_children.' + field + "." + parentLayer.idProperty ] = id;
+            selector[ '_children.' + field + "." + self.idProperty ] = id;
+            consolelog( rnd, "SELECTOR:" );
+            consolelog( rnd, selector );
 
-            console.log("DEBUG2:", selector, relativeUpdateObject );
             parentLayer.collection.update( selector, { $set: relativeUpdateObject, $unset: relativeUnsetObject }, { multi: true }, function( err, total ){
               if( err ) return cb( err );
 
@@ -1499,9 +1518,9 @@ var TingoMixin = declare( null, {
 
             consolelog( rnd, "CASE #2 (updateMany)", params.op );
 
-            // Sorry, can't. MongoDb bug #1243
+            // Sorry, can't. TingoDb bug #1243
             if( nestedParams.type === 'multiple' ){
-              cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Mongo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is unimplementable") );
+              cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Tingo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is unimplementable") );
             }
 
             // Assign the parameters
@@ -1512,8 +1531,8 @@ var TingoMixin = declare( null, {
 
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
-              // var mongoParameters = parentLayer._makeMongoParameters( filters );
+              var mongoParameters = parentLayer._makeTingoParameters( filters, field );
+              // var mongoParameters = parentLayer._makeTingoParameters( filters );
             } catch( e ){
               return cb( e );
             }
@@ -1561,7 +1580,7 @@ var TingoMixin = declare( null, {
             var updateObject = {};
 
             var selector = {};
-            selector[ '_children.' + field + "." + parentLayer.idProperty ] = id;
+            selector[ '_children.' + field + "." + self.idProperty ] = id;
 
             // It's a lookup field: it will assign an empty object
             if( nestedParams.type === 'lookup' ){
@@ -1573,7 +1592,8 @@ var TingoMixin = declare( null, {
               updateObject[ '$pull' ] = {};
 
               var pullData = {};
-              pullData[ parentLayer.idProperty  ] =  id ;
+              // TODO: CHECK IF THIS SHOULD BE self.idProperty OR parentLayer.idProperty
+              pullData[ self.idProperty  ] =  id ;
               updateObject[ '$pull' ] [ '_children.' + field ] = pullData;
             }
 
@@ -1601,14 +1621,14 @@ var TingoMixin = declare( null, {
 
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
+              var mongoParameters = parentLayer._makeTingoParameters( filters, field );
             } catch( e ){
               return cb( e );
             }
 
             // Make up parameters from the passed filters
             try {
-              var mongoParametersForPull = parentLayer._makeMongoParameters( filters );
+              var mongoParametersForPull = parentLayer._makeTingoParameters( filters );
             } catch( e ){
               return cb( e );
             }
@@ -1632,7 +1652,7 @@ var TingoMixin = declare( null, {
               });
 
             // It's a multiple one: it will $pull the elementS (with an S, plural) out
-            // Note that we don't need the "ugly hack" here (_mongoUglyUpdateWrapper) as the $pull operation in MongoDB
+            // Note that we don't need the "ugly hack" here (_mongoUglyUpdateWrapper) as the $pull operation in TingoDB
             // takes a condition itself -- condition that I replicate
             } else {
               updateObject[ '$pull' ] = {};
@@ -1681,43 +1701,3 @@ TingoMixin.makeId = function( id, cb ){
 
 exports = module.exports = TingoMixin;
 
-/*
-
-  // This will need to stay until https://jira.mongodb.org/browse/SERVER-1243 is resolved (ugh)
-  _mongoUglyUpdateWrapperOBSOLETE: function( querySelector, updateObject, options, cb ){
-
-    var self = this;
-    var total = 0;
-    var partialTotal;
-
-    var rnd = Math.floor(Math.random()*100 );
-    consolelog( rnd, "ENTRY: _mongoUglyUpdateWrapper" );
-    consolelog( rnd, 'Params:' );
-    consolelog( rnd,  querySelector );
-    consolelog( rnd,  updateObject);
- 
-
-    async.whilst(
-      function() { return partialTotal != 0 },
-
-      function( callback ){
-       
-        consolelog( rnd, "In whilst function. Total: ", total );
-        self.collection.update( querySelector, updateObject, options, function( err, t ){
-          if( err ) return callback( err );
-
-          total += t;
-
-          console.log( rnd, "Update done, updated ", t, "records, total (for now) is:", total );
-
-          partialTotal = t;
-          callback( null );
-        });
-      },
-      function (err) {
-        if( err ) return cb( err );
-        cb( null, total );
-      }
-    );
-  };
-*/
