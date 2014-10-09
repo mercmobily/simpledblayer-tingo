@@ -16,6 +16,7 @@ var
 , declare = require('simpledeclare')
 , engine = require("tingodb")({})
 , async = require('async')
+, debug = require('debug')
 ;
 
 // Return the object itself, or a createFromString() version of it
@@ -24,10 +25,7 @@ var ObjectId = function( id ){
   return engine.ObjectID.createFromString( id );
 }
 
-
-var consolelog = function(){
-  //console.log.apply( console, arguments );
-}
+var consolelog = debug( 'simpledblayer:tingo');
 
 var TingoMixin = declare( null, {
 

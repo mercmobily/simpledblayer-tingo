@@ -20,7 +20,8 @@
     "simpledblayer": "0.3.x",
     "simpledeclare": "0.3.x",
     "tingodb": "0.2.x",
-    "async": "~0.2.x"
+    "async": "~0.2.x",
+    "debug": "2.x"
   },
   "scripts": {
     "test": "nodeunit test.js"
