@@ -27,12 +27,21 @@ var ObjectId = function( id ){
 
 var consolelog = debug( 'simpledblayer:tingo');
 
-var TingoMixin = declare( null, {
+function _makeOperator( op ){
+  return function( a, b ){
+    var r = {};
+    r[ a ] = { };
+    r[ a ][ op ] =  b;
+    return r;
+  }
+}
+
+var MongoMixin = declare( null, {
 
   _projectionHash: {},
   _fieldsHash: {},
 
-  constructor: function( table, options ){
+  constructor: function(){
 
     var self = this;
 
@@ -52,158 +61,200 @@ var TingoMixin = declare( null, {
     // Create self.collection, used by every single query
     self.collection = self.db.collection( self.table );
 
+    if( MongoMixin.registry[ self.table ] ){
+      throw new Error( "Only one layer instance can be created for table " + self.table );
+    }
+    MongoMixin.registry[ self.table ] = self;
+
   },
 
   // The default id maker available as an object method
   makeId: function( object, cb ){
-    TingoMixin.makeId( object, cb );
+    MongoMixin.makeId( object, cb );
   },
+
+
+  _isSearchableAsString: function( field ){
+    return this._searchableHash[ field ] && this._searchableHash[ field ].type === 'string'; 
+  },
+
+  _addPrefix: function( field, fieldPrefix ){
+
+    // mongoPath will be the full path
+    return ( ( typeof( fieldPrefix ) === 'string' && fieldPrefix !== '' ) ? fieldPrefix + '.' : '' ) + field;
+
+  },
+
+
+  // If there are ".", then some children records are being referenced.
+  // The actual way they are placed in the record is in _children; so,
+  // add _children where needed.
+  _addChildrenPrefixToPath: function( s ){
+
+    if( s.match(/\./ ) ){
+
+      var l = s.split( /\./ );
+      for( var i = 0; i < l.length-1; i++ ){
+        l[ i ] = '_children.' + l[ i ];
+      }
+      return l.join( '.' );
+
+    } else {
+      return s;
+    }   
+  },
+
+  _addUcPrefixToPath: function( s ){
+    var a = s.split('.');
+    a[ a.length - 1 ] = '__uc__' + a[ a.length - 1 ];
+    return a.join('.');
+  },
+
+  _operators: {
+
+    lt: _makeOperator( '$lt' ),
+    gt: _makeOperator( '$gt' ),
+
+    lte: _makeOperator( '$lte' ),
+    gte: _makeOperator( '$gte' ),
+
+    eq: function( a, b ){
+      var r = {};
+      r[ a ] = b;
+      return r;
+    },
+  
+    startsWith: function( a, b ){
+      var r = {};
+      r[ a ] = new RegExp('^' + b + '.*' );
+      return r;
+    },
+
+    endsWith: function( a, b ){
+      var r = {};
+      r[ a ] = new RegExp('.*' + b + '$' );
+      return r;
+    },
+
+    contains: function( a, b ){
+      var r = {};
+      r[ a ] =  new RegExp('^.*' + b + '.*$' );
+      return r;
+    }
+
+  },
+
 
   // Make parameters for queries. It's the equivalent of what would be
   // an SQL creator for a SQL layer
-  _makeTingoParameters: function( filters, fieldPrefix ){
+  _makeMongoParameters: function( filters, fieldPrefix, selectorWithoutBells ){
+    return  {
+      querySelector: this._makeMongoFilter( filters.conditions || {}, fieldPrefix, selectorWithoutBells ),
+      sortHash:  this._makeMongoSortHash( filters.sort || {}, fieldPrefix )
+    }
+  },
+    
+  // Converts `conditions` to a workable mongo filters. Most of the complexity of this
+  // function is due to the fact that it deals with the presence of `fieldPrefix` (in case
+  // a child field is being modified, which will imply adding '_children.' to it) and
+  // the presence of `selectorWithoutBells` (necessary for `$pull` operation in children)
+  _makeMongoFilter: function( conditions, fieldPrefix, selectorWithoutBells ){
+
+    //consolelog("FILTERS IN MONGO MIXIN: " );
+    //consolelog( require('util').inspect( filters, {depth: 10 }) );
 
     var self = this;
+    var a, aWithPrefix, aIsSearchableAsString, b;
+      
+    // If there is no condition, return an empty filter
+    if( ! conditions.name ) return {};
 
-    var selector = {}, finalSelector = {};
+    // Scan filters recursively, making up the mongo query
+    if( conditions.name == 'and' || conditions.name == 'or' ){
+     
+      // For 'and', it will return { $and: [ ... ] }
+      var mongoName = '$' + conditions.name;
 
-    if( typeof( filters.conditions ) !== 'undefined' && filters.conditions !== null ){
-      selector[ '$and' ] =  [];
-      selector[ '$or' ] =  [];
+      // The content of the $and key will be the result of makeMongo
+      var r = {};
+      r[ mongoName ] = conditions.args.map( function( item ){
+        return self._makeMongoFilter( item, fieldPrefix, selectorWithoutBells );
+      })          
+      return r;
 
-      Object.keys( filters.conditions ).forEach( function( condition ){
+    } else {
 
-        // Sets the mongo condition
-        var mongoOperand = '$and';
-        if( condition === 'or' ) mongoOperand = '$or';      
- 
-        filters.conditions[ condition ].forEach( function( fieldObject ){
+      // Otherwise, run the operator encoutered
+      // (But, remember to fixup the field name (paths, etc.) and possibly the checked value (uppercase)
+      var operator = this._operators[ conditions.name ];
+      if( ! operator ) throw( new Error( "Could not find operator: " + conditions.name ) ); 
 
-          if( fieldPrefix ) {
-            fieldPrefix = fieldPrefix + '.';
-          } else {
-            fieldPrefix = '';
-          }
+      // Save this for later
+      a = conditions.args[ 0 ];
+      b = conditions.args[ 1 ];
 
-          var field = fieldObject.field;
-          var v = fieldObject.value;
+      // Making up aWithPrefix, useful to check if it's searchable, if
+      // b should be converted to upperCase(), etc.
 
-          // If a search is attempted on a non-searchable field, will throw
-          //consolelog("SEARCHABLE HASH: ", self._searchableHash, field );
-          if( !self._searchableHash[ fieldPrefix + field ] ){
-            //consolelog( self._searchableHash, { depth: 10 } );
-            throw( new Error("Field " + fieldPrefix + field + " is not searchable" ) );
-          }
+      // Create aWithPrefi, whici is simply `a` with the prefix prepended
+      // to it
+      aWithPrefix = this._addPrefix( a, fieldPrefix );
 
-         // Change 'field' so that it includes the full path, including the prefix.
-         // If it's a string, change to uppercase search (uppercase v, and search on __uc__ field)
-         // This way, all searches are case-insensitive
-          if( self._searchableHash[ fieldPrefix + field ] === 'upperCase' ){
-            v = v.toUpperCase();
-            field = fieldPrefix + '__uc__' + field;
-          } else {
-            field = fieldPrefix + field;
-          }
-
-          // If there are ".", then some children records are being referenced.
-          // The actual way they are placed in the record is in _children; so,
-          // add _children where needed.
-          field = self._makeTingoFieldPath( field );
-
-          // Make up item. Note that any search will be based on _searchData
-          var item = { };
-          item[ field ] = {};
-
-          switch( fieldObject.type ){
-            case 'lt':
-              item[ field ] = { $lt: v };
-            break;
-
-            case 'lte':
-              item[ field ] = { $lte: v };
-            break;
-
-            case 'gt':
-              item[ field ] = { $gt: v };
-            break;
-
-            case 'gte':
-              item[ field ] = { $gte: v };
-            break;
-
-            case 'is':
-            case 'eq':
-              item[ field ] = v;
-            break;
-
-            case 'startsWith':
-            case 'startWith':
-              item[ field ] = new RegExp('^' + v + '.*' );
-            break;
-
-            case 'contain':
-            case 'contains':
-              item[ field ] = new RegExp('.*' + v + '.*' );
-            break;
-
-            case 'endsWith':
-            case 'endWith':
-              item[ field ] = new RegExp('.*' + v + '$' );
-            break;
-
-            default:
-              throw( new Error("Field type unknown: " + fieldObject.type ) );
-            break;
-          }
-        
-          // Finally, push down the item!
-          selector[ mongoOperand ].push( item );
-        });
- 
-      });
-
-      // Assign the `finalSelector` variable. Note that the final result can be:
-      // * Just $and conditions: { '$and': [ this, that, other ] }
-      // * Just $or conditions : { '$or': [ this, that, other ] }
-      // * $and conditions with $or: { '$and': [ this, that, other, { '$or': [ blah, bleh, bligh ] } ] }
-
-      // No `$and` conditions...
-      if( selector[ '$and' ].length === 0 ){
-        // ...maybe there are `or` ones, which will get returned
-        if( selector[ '$or' ].length !== 0 ) finalSelector[ '$or' ] = selector[ '$or' ];
-
-      // There are `$and` conditions: assign them...
-      } else {
-        finalSelector[ '$and' ] = selector[ '$and' ];
-
-        // ...and shove the `$or` ones in there as one of them
-        if( selector[ '$or' ].length !== 0 ){
-          finalSelector[ '$and' ].push( { '$or': selector[ '$or' ] } );
-        }
-
+      // Check that aWithPrefix is indeed searchable
+      if( !self._searchableHash[ aWithPrefix ] ){
+        throw( new Error("Field " + aWithPrefix + " is not searchable" ) );
       }
-      consolelog( "FINAL SELECTOR" );        
-      consolelog( require('util').inspect( finalSelector, { depth: 10 } ) );        
-      consolelog( this.table );
-    };    
 
-    // make sortHash
-    // If field is marked as upperCase, swap field names for _uc_ equivalent so that
-    // sorting happens regardless of upper or lower case
+      // Create aIsSearchableAsString. Saving the result as I will need the result
+      // if this check later on, to determine whether to add __uc__ to `a`
+      aIsSearchableAsString = this._isSearchableAsString( aWithPrefix );
+
+      // `upperCase()` `b` if a is of type 'string', since it will be compared to
+      // the __uc__ equivalent field
+      b = aIsSearchableAsString ? b.toUpperCase() : b;
+     
+      // Unless we want a selector without path (only used when `$pull`ing an array in `deleteMany`),
+      // `a` needs to become `aWithPrefix`.
+      a = selectorWithoutBells ? a : aWithPrefix;
+
+      // Add __uc__ (if field is 'string') to path
+      if( aIsSearchableAsString ) a = self._addUcPrefixToPath( a );
+
+      // Add _children to `a` (unless a selector without bells was required)
+      a = selectorWithoutBells ? a : self._addChildrenPrefixToPath( a );
+
+      // Call the operator on the two values
+      return operator.call( this, a, b, fieldPrefix, selectorWithoutBells );
+    }
+
+  }, 
+
+
+  _makeMongoSortHash: function( sort, fieldPrefix ){
+
+    var self = this;
     var sortHash = {};
 
-    consolelog( "filters.sort is:", filters.sort );        
+    consolelog( "filters.sort is:", sort );        
     //consolelog( "_sortableHash is:", self._sortableHash );        
-    for( var field  in filters.sort ) {
-      var sortDirection = filters.sort[ field ]
+    for( var field  in sort ) {
+      var sortDirection = sort[ field ]
 
-      //if( self._sortableHash[ field ] || field === self.positionField ){
-      if( self._searchableHash[ field ] || field === self.positionField ){
+      var searchableHashEntry = ( fieldPrefix ? fieldPrefix + '.' : '' ) + field;
+      if( self._searchableHash[ searchableHashEntry ] || field === self.positionBaseField ){
+       
+        // Add prefix to the field
+        field = this._addPrefix( field, fieldPrefix );
 
-        field = self._makeTingoFieldPath( field );
-        if( self._searchableHash[ field ] === 'upperCase' ){
-          field = self._addUcPrefixToPath( field );
+        // Check that it's searchable -- if not, it's not sortble either
+        if( !self._searchableHash[ field ] ){
+          throw( new Error("Field " + dottedPath + " is not searchable, and therefore not sortable" ) );
         }
+
+        if( self._isSearchableAsString( field ) ){
+          field = this._addUcPrefixToPath( field );
+        }
+        field = this._addChildrenPrefixToPath( field );
 
         sortHash[ field ] = sortDirection;
       }
@@ -211,12 +262,76 @@ var TingoMixin = declare( null, {
     consolelog( "FINAL SORTHASH", self.table );        
     consolelog( require('util').inspect( sortHash, { depth: 10 } ) );        
 
-    return { querySelector: finalSelector, sortHash: sortHash };
-  }, 
+    return sortHash;
+  },
 
- 
+
+  cleanRecord: function( obj, skip, cb ){
+
+    var self = this;
+
+    consolelog("*******CLEANRECORD CALLED! OBJECT, SKIP", obj, skip );
+
+    // If skip, then don't do anything
+    if( skip ) return cb( null, obj );
+
+    self._completeRecord( obj, function( err, obj ){
+      if( err ) return cb( err );
+
+      // The _id field cannot be updated. If it's there,
+      // simply delete it
+      self._addUcFields( obj );
+      obj._clean = true;  
+
+      // Update record so that it's marked as "clean"
+      var updateQuery = {};
+      updateQuery[ self.idProperty ] = obj[ self.idProperty ];
+      self.collection.update( updateQuery, { $set: obj }, { multi: false }, function( err, total ){
+        if( err ) return cb( err );
+
+        delete obj._clean;
+        self._deleteUcFields( obj );
+
+        cb( null, obj );
+      });
+    });
+  },
+  
+
+  dirtyRecord: function( obj, cb ){
+    var self = this;
+
+    // Update record so that it's marked as "dirty"
+    var updateQuery = {};
+    updateQuery[ self.idProperty ] = obj[ self.idProperty ];
+    consolelog("DOING: ", updateQuery );
+    self.collection.update( updateQuery, { $set: { _clean: false } }, { multi: false }, cb );
+  },
+
+  dirtyAll: function( cb ){
+    var self = this;
+
+    // Update ALL records so that they are marked as "dirty"
+    self.collection.update( {}, { $set: { _clean: false } }, { multi: true }, cb );
+  },
+
+  dirtyAllParents: function( cb ){
+    var self = this;
+
+    async.each(
+      self.parentTablesArray,
+      function( layer, cb ){
+
+        self.parentTablesArray.forEach( function( layer ){
+          // Update ALL records so that they are marked as "dirty"
+          layer.layer.collection.update( {}, { $set: { _clean: false } }, { multi: true }, cb );
+       });
+      },
+      cb
+    );
+  },
+
   select: function( filters, options, cb ){
-
 
     var self = this;
     var saneRanges;
@@ -231,7 +346,7 @@ var TingoMixin = declare( null, {
 
     // Make up parameters from the passed filters
     try {
-      var mongoParameters = this._makeTingoParameters( filters );
+      var mongoParameters = this._makeMongoParameters( filters );
     } catch( e ){
       return cb( e );
     }
@@ -239,6 +354,9 @@ var TingoMixin = declare( null, {
     // If sortHash is empty, AND there is a self.positionField, then sort
     // by the element's position
     consolelog("TABLE:", self.table );
+    consolelog("OPTIONS", options );
+    consolelog("FILTERS", filters );
+
     consolelog("SORT HASH", mongoParameters.sortHash );
     consolelog( Object.keys( mongoParameters.sortHash ).length );
     consolelog( self.positionField );
@@ -250,16 +368,16 @@ var TingoMixin = declare( null, {
     //consolelog("CHECK THIS:");
     //consolelog( require('util').inspect( mongoParameters, { depth: 10 } ) );
 
+    // The projectionHash hash will always include:
+    //  * _clean (which will tell the driver if a record is actually clean, which
+    //     means all of its _children are up to date) and
+    // * _children  (which is the list of children, only if _children is true)
     var projectionHash = {};
-    if( ! options.children ){
-      projectionHash = self._projectionHash;
-    } else {
-      for( var k in self._projectionHash ) projectionHash[ k ] = self._projectionHash[ k ];
-      projectionHash._children = true;
-    }
-
-
-    consolelog("PH: ", mongoParameters.querySelector, projectionHash );
+    for( var k in self._projectionHash ) projectionHash[ k ] = self._projectionHash[ k ];
+    if( options.children ) projectionHash._children = true;      
+    projectionHash._clean = true;
+   
+    consolelog("PH: ", options, mongoParameters.querySelector, projectionHash );
     consolelog("TABLE: ", self.table );
 
     // Actually run the query 
@@ -271,207 +389,259 @@ var TingoMixin = declare( null, {
     saneRanges = self.sanitizeRanges( filters.ranges, options.useCursor || options.skipHardLimitOnQueries );
 
     // Skipping/limiting according to ranges/limits
-    if( saneRanges.from != 0 )  cursor.skip( saneRanges.from );
-    if( saneRanges.limit != 0 ) cursor.limit( saneRanges.limit );
+    if( saneRanges.skip )  cursor.skip( saneRanges.skip );
+    if( saneRanges.limit ) cursor.limit( saneRanges.limit ); 
 
     // Sort the query
     cursor.sort( mongoParameters.sortHash , function( err ){
-      if( err ){
-        next( err );
-      } else {
+      if( err ) return next( err );
 
-        if( options.useCursor ){
+      if( options.useCursor ){
 
-          cursor.count( function( err, grandTotal ){
-            if( err ){
-              cb( err );
-            } else {
+        cursor.count( function( err, grandTotal ){
+          if( err ) return cb( err );
+         
+          cursor.count( { applySkipLimit: true }, function( err, total ){
+            if( err ) return cb( err );
+          
+            cb( null, {
 
-              cursor.count( { applySkipLimit: true }, function( err, total ){
-                if( err ){
-                  cb( err );
-                } else {
+              each: function( iterator, endCallback ){
 
-                  cb( null, {
-      
-                    next: function( done ){
-      
-                      cursor.nextObject( function( err, obj) {
-                        if( err ){
-                          done( err );
-                        } else {
-      
-                          // If options.delete is on, then remove a field straight after fetching it
-                          if( options.delete && obj !== null ){
-                            self.collection.remove( { _id: obj._id }, function( err, howMany ){
-                              if( err ){
-                                done( err );
-                              } else {
+                var i;
+                var self = this;
+                async.doWhilst(
 
-                                if( typeof( self._fieldsHash._id ) === 'undefined' )  delete obj._id;
+                  function( callback ){
 
-                                // We will need this later if option.children was true, as
-                                // schema.validate() will wipe it
-                                if( options.children ) var _children = obj._children;
+                    self.next( function( err, element ){
+                      if( err ) return callback( err );
 
-                                self.schema.validate( obj, { deserialize: true }, function( err, obj, errors ){
+                      i = element;
 
-                                  // If there is an error, end of story
-                                  // If validation fails, call callback with self.SchemaError
-                                  if( err ) return cb( err );
-                                  //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
+                      // If the element is null, nothing to do. This will also
+                      // be the last iteration of this async.doWhilst cycle
+                      if( element === null ) return callback( null );
 
-                                  // Re-add children, since it was required by the options
-                                  // and got cleaned out by schema.validate()
-                                  if( options.children ) obj._children = _children;
-                                  self._deleteUcFieldsfromChildren( _children );
+                      iterator( element, function( err, breakFlag ){
+                        if( err ) return callback( err );
 
-                                  done( null, obj );
-                                });
-                              }
-                            });
-                          } else {
+                        // If breakFlag, force quitting the cycle (neatly)
+                        if( breakFlag ) i = null;
 
-                            if( obj !== null && typeof( self._fieldsHash._id ) === 'undefined' )  delete obj._id;
+                        callback( null );
 
-                            if( obj === null ) return done( null, obj );
-
-                            self.schema.validate( obj, {  deserialize: true }, function( err, obj, errors ){
-
-                              // If there is an error, end of story
-                              // If validation fails, call callback with self.SchemaError (MAYBE?)
-                              if( err ) return cb( err );
-                              //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
-
-                              // Re-add children, since it was required by the options
-                              // and got cleaned out by schema.validate()
-                              if( options.children ){
-                                obj._children = _children;
-                                self._deleteUcFieldsfromChildren( _children );
-                              }
-                              done( null, obj );
-                            });
-                              
-                          }
-                        }
                       });
-                    },
-      
-                    rewind: function( done ){
+                    });
+                  },        
+                  function(){ return i !== null; },
+
+                  function( err ) {
+                    if( err ) return endCallback( err );
+
+                    endCallback( null );
+                  }
+                );
+
+              },
+
+              next: function( done ){
+
+                cursor.nextObject( function( err, obj ) {
+                  if( err ) return done( err );
+
+                  // Returned null: nothing to see here
+                  if( obj === null ) return done( null, null );
+
+                  // Mongo will return _id: if it's not in the schema, zap it
+                  if( typeof( self._fieldsHash._id ) === 'undefined' )  delete obj._id;
+
+                  // We will need this later if option.children was true, as
+                  // schema.validate() will wipe it
+                  if( options.children ) var _children = obj._children;
+                  var clean = obj._clean;
+
+                  self.schema.validate( obj, { deserialize: true }, function( err, obj, errors ){
+
+                    // If there is an error, end of story
+                    // If validation fails, call callback with self.SchemaError
+                    if( err ) return cb( err );
+                    //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
+
+                    // Re-add children, since it may be required later and was zapped by
+                    // schema.validate()
+                    if( options.children ) obj._children = _children;
+
+                    // If the object isn't clean, then it will trigger the _completeRecord
+                    // call which will effectively complete the record with the right _children
+                    // Note that after this call obj._children may or may not get
+                    // overwritten (depends wheter _cleanRecord gets skipped).
+                    var skip = !options.children || clean; 
+                    self.cleanRecord( obj, skip, function( err ){
+                      if( err ) return done( err );
+
+                      // Note: at this point, _children might be either the old existing one,
+                      // or a new copy created by _cleanRecord
+                      // At this point, sort out _children (which might get deleted
+                      // altogether or might need extra _uc__ fields) AND
+                      // get rid of obj._clean which isn't meant to be returned to the user
+                      if( options.children) self._deleteUcFieldsAndCleanfromChildren( _children );
+                      delete obj._clean;
+
+                      // If options.delete is on, then remove a field straight after fetching it
                       if( options.delete ){
-                        done( new Error("Cannot rewind a cursor with `delete` option on") );
-                      } else {
-                        cursor.rewind();
-                        done( null );
+                        return self.collection.remove( { _id: obj._id }, done );
                       }
-                    },
-                    close: function( done ){
-                      cursor.close( done );
-                    }
-                  }, total, grandTotal );
 
+                      done( null, obj );
+                    });
+                  });                            
+                
+                });
+              },
+
+              rewind: function( done ){
+                if( options.delete ){
+                  done( new Error("Cannot rewind a cursor with `delete` option on") );
+                } else {
+                  cursor.rewind();
+                  done( null );
                 }
-              });
+              },
+              close: function( done ){
+                cursor.close( done );
+              }
+            }, total, grandTotal );
 
-            }
+          
           });
 
-        } else {
+        
+        });
+
+      } else {
 
 
-          cursor.toArray( function( err, queryDocs ){
-            if( err ){
-             cb( err );
-            } else {
+        cursor.toArray( function( err, queryDocs ){
+          if( err ) return cb( err );
+        
+          cursor.count( function( err, grandTotal ){
+            if( err ) return cb( err );
+            
+            cursor.count( { applySkipLimit: true }, function( err, total ){
+              if( err ) return cb( err );
+            
+              // Cycle to work out the toDelete array _and_ get rid of the _id_
+              // from the resultset
+              /*
+              var toDelete = [];
+              queryDocs.forEach( function( doc ){
+                if( options.delete ) toDelete.push( doc._id );
+                if( typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
+              });
+              */
 
-              cursor.count( function( err, grandTotal ){
-                if( err ){
-                  cb( err );
-                } else {
+              consolelog("QUERYDOCS: ", queryDocs );
 
-                  cursor.count( { applySkipLimit: true }, function( err, total ){
-                    if( err ){
-                      cb( err );
-                    } else {
+              var toDelete = [];
+              var changeFunctions = [];
+              // Validate each doc, running a validate function for each one of them in parallel
+              queryDocs.forEach( function( doc, index ){
 
-                      // Cycle to work out the toDelete array _and_ get rid of the _id_
-                      // from the resultset
-                      var toDelete = [];
-                      queryDocs.forEach( function( doc ){
-                        if( options.delete ) toDelete.push( doc._id );
-                        if( typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
-                      });
+                // Mark this as one to be deleted at the end
+                if( options.delete ) toDelete.push( doc._id );
 
-                      // If it was a delete, delete each record
-                      // Note that there is no check whether the delete worked or not
-                      if( options.delete ){
-                        toDelete.forEach( function( _id ){
-                          self.collection.remove( { _id: _id }, function( err ){ } );
-                        });
-                      }
+                // Mongo will return _id: if it's not in the schema, zap it
+                if( typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
 
-                      var changeFunctions = [];
-                      // Validate each doc, running a validate function for each one of them in parallel
-                      queryDocs.forEach( function( doc, index ){
+                // We will need this later if option.children was true, as
+                // schema.validate() will wipe it
+                if( options.children ) var _children = doc._children;
+                var clean = doc._clean;
 
-                        // We will need this later if option.children was true, as
-                        // schema.validate() will wipe it
-                        if( options.children ) var _children = doc._children;
+                changeFunctions.push( function( callback ){
+                  self.schema.validate( doc, { deserialize: true }, function( err, validatedDoc, errors ){
+                    if( err ) return callback( err );
+                    //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
 
-                        changeFunctions.push( function( callback ){
-                          self.schema.validate( doc,  { deserialize: true }, function( err, validatedDoc, errors ){
-                            if( err ){
-                              callback( err );
-                            } else {
+                    // Re-add children, since it may be required later and was zapped by
+                    // schema.validate()
+                    if( options.children) validatedDoc._children = _children;
 
-                              // Re-add children, since it was required by the options
-                              // and got cleaned out by schema.validate()
-                              if( options.children ){
-                                validatedDoc._children = _children;
-                                self._deleteUcFieldsfromChildren( _children );
-                              }
-                               
-                              //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
-                              queryDocs[ index ] = validatedDoc;
-                               
-                              callback( null );
-                            }
-                          });
-                        });
-                      }); 
-                      async.parallel( changeFunctions, function( err ){
-                        if( err ) return cb( err );
+                    // If the object isn't clean, then it will trigger the _completeRecord
+                    // call which will effectively complete the record with the right _children
+                    var skip = clean || ! options.children;
+                    self.cleanRecord( validatedDoc, skip, function( err ){
+                      if( err ) return callback( err );
 
-                        // That's all!
-                        cb( null, queryDocs, total, grandTotal );
-                      });
+                      // Note: at this point, _children might be either the old existing one,
+                      // or a new copy created by _cleanRecord
+                      // At this point, sort out _children (which might get deleted
+                      // altogether or might need extra _uc__ fields) AND
+                      // get rid of obj._clean which isn't meant to be returned to the user
+                      if( options.children) self._deleteUcFieldsAndCleanfromChildren( _children );
+                      delete validatedDoc._clean;
 
-                    };
+                      //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
+                      queryDocs[ index ] = validatedDoc;
+                       
+
+                      callback( null );
+                    });
+
                   });
-
-                };
+                });
               });
 
-            };
-          })
+              // If it was a delete, delete each record
+              // Note that there is no check whether the delete worked or not
+              if( options.delete ){
+                toDelete.forEach( function( _id ){
+                  self.collection.remove( { _id: _id }, function( err ){ } );
+                });
+              }
 
-        }
+              async.parallel( changeFunctions, function( err ){
+                if( err ) return cb( err );
+
+                // That's all!
+                cb( null, queryDocs, total, grandTotal );
+              });
+
+            
+            });
+
+
+          });
+
+        
+        })
+
       }
+    
     });
        
   },
 
 
-  update: function( filters, updateObject, options, cb ){
+  update: function( conditions, updateObject, options, cb ){
 
     var self = this;
 
     var unsetObject = {};
 
+    // This is such a common mistake, I will make thins work and give out a warning
+    if( conditions.conditions ){
+      console.warn( "(In update) update and delete methods only accept conditions, not filters. Refer to documentation of SimpleDbLayer. This query will still work, but possibly not as expected (ranges and limits are not applied)" );
+      conditions = conditions.conditions;
+    }
+
+    // Make up a `filter` object; note that only `condition` will ever be passed to _makeMongoParameters
+    var filters = { conditions: conditions };
+
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
     consolelog( rnd, "ENTRY: update for ", self.table, ' => ', updateObject, "options:", options );
-
 
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
@@ -487,14 +657,14 @@ var TingoMixin = declare( null, {
     // deleteUnsetFields is there so that a "document.save()"-style called can be performed
     // easily.
     if( options.multi && options.deleteUnsetFields ){
-      return cb( new Error("THe options multi and deleteUnsetFields are mutually exclusive -- one or the other") );
+      return cb( new Error("The options 'multi' and 'deleteUnsetFields' are mutually exclusive -- one or the other") );
     }
 
     // Validate the record against the schema
 
     // If deleteUnsetFields is set, then the validation will apply to _every_ field in the schema.
     // Otherwise, just to the passed fields is fine
-    var onlyObjectValues = options.deleteUnsetFields ? false : true;
+    var onlyObjectValues = !options.deleteUnsetFields;
 
     // Validate what was passed...
     self.schema.validate( updateObject, { onlyObjectValues: onlyObjectValues, skip: options.skipValidation }, function( err, updateObject, errors ){
@@ -520,41 +690,40 @@ var TingoMixin = declare( null, {
       // If `options.deleteUnsetFields`, Unset any value that is not actually set but IS in the schema,
       // so that partial PUTs will "overwrite" whole objects rather than
       // just overwriting fields that are _actually_ present in `body`
+      // NOTE: fields marked as "protected" in the schema are spared, as they are... well, protected!
       if( options.deleteUnsetFields ){
         Object.keys( self._fieldsHash ).forEach( function( i ){
-           if( typeof( updateObject[ i ] ) === 'undefined' && i !== '_id' && i !== self.positionField ){
-             unsetObject[ i ] = 1;
+          if( !self.schema.structure[ i ].protected && typeof( updateObject[ i ] ) === 'undefined' && i !== '_id' && i !== self.positionField && i != '_clean' ){
+            unsetObject[ i ] = 1;
 
-             // Get rid of __uc__ objects if the equivalent field was out
-             if( self._searchableHash[ i ] === 'upperCase' && unsetObject[ i ] ){
-               unsetObject[ '__uc__' + i ] = 1;
-             }
-
-           }
+            // Get rid of __uc__ objects if the equivalent field was taken out
+            if( self._isSearchableAsString( i ) && unsetObject[ i ] ){
+              unsetObject[ '__uc__' + i ] = 1;
+            }
+          }
         });
       }
 
       // Make up parameters from the passed filters
       try {
-        var mongoParameters = self._makeTingoParameters( filters );
+        var mongoParameters = self._makeMongoParameters( filters );
       } catch( e ){
         return cb( e );
       }
 
-      
-
       consolelog( rnd, "About to update. At this point, updateObject is:", updateObject );
       consolelog( rnd, "Selector:", mongoParameters.querySelector );
 
-      self._makeUpdateObjectWithLookups( updateObject, function( err, updateObjectWithLookups ){
+      self._makeUpdateAndUnsetObjectWithLookups( updateObject, unsetObject, function( err, updateObjectWithLookups, unsetObjectWithLookups  ){
         if( err ) return cb( err );
 
         consolelog( rnd, "Update object with lookups:", updateObjectWithLookups );
+        consolelog( rnd, "Unset object with lookups:", unsetObjectWithLookups );
 
-        // If options.multi is off, then use findAndModify which will accept sort
+        // If options.multi is off, then use findAndModify which will return the doc
         if( !options.multi ){
 
-          self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: updateObjectWithLookups, $unset: unsetObject }, function( err, doc ){
+          self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: updateObjectWithLookups, $unset: unsetObjectWithLookups }, function( err, doc ){
             if( err ) return cb( err );
 
             if( doc ){
@@ -570,12 +739,11 @@ var TingoMixin = declare( null, {
             }
           });
 
-        // If options.multi is on, then "sorting" doesn't make sense, it will just use mongo's "update"
-        // (With SimpleDbLayer you cannot decide to do  mass update un a limited number of records)
+        // If options.multi is on, no document will be returned: it will just use mongo's "update"
         } else {
 
           // Run the query
-          self.collection.update( mongoParameters.querySelector, { $set: updateObjectWithLookups, $unset: unsetObject }, { multi: true }, function( err, total ){
+          self.collection.update( mongoParameters.querySelector, { $set: updateObjectWithLookups, $unset: unsetObjectWithLookups }, { multi: true }, function( err, total ){
             if( err ) return cb( err );
 
             // MONGO: Change parents
@@ -597,7 +765,6 @@ var TingoMixin = declare( null, {
 
     var self = this;
     var recordWithLookups = {};
-
 
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
@@ -624,13 +791,6 @@ var TingoMixin = declare( null, {
         return cb( schemaError );
       }
 
-      // Copy record over, only for existing fields
-      // Deleted, as at this point if a field doesn't belong to the schema
-      // an exception will be raised
-      //for( var k in record ){
-      //  if( typeof( self._fieldsHash[ k ] ) !== 'undefined' ) recordCleanedUp[ k ] = record[ k ];
-      //}
-
       consolelog( rnd, "record after validation:", record );
 
       // Add __uc__ fields to the record
@@ -638,34 +798,76 @@ var TingoMixin = declare( null, {
 
       consolelog( rnd, "record with __uc__ fields:", record );
  
-      self._makeRecordWithLookups( record, function( err, recordWithLookups ){
+      self._completeRecord( record, function( err, recordWithLookups ){
         if( err ) return cb( err );
      
         consolelog( rnd, "recordWithLookups is:", recordWithLookups);
 
-        // Every record in Tingo MUST have an _id field. Note that I do this here
+        // Every record in Mongo MUST have an _id field. Note that I do this here
         // so that record doesn't include an _id field when self._makeRecordWithLookups
         // is called (which would imply that $pushed, non-main children elements would also
         // have _id
         if( typeof( recordWithLookups._id ) === 'undefined' ) recordWithLookups._id  = ObjectId();
 
+        recordWithLookups._clean = true;
+
         consolelog( rnd, "record with _id added:", record );
+        consolelog( rnd, "ADDING:", recordWithLookups );
 
         // Actually run the insert
         self.collection.insert( recordWithLookups, function( err ){
           if( err ) return cb( err );
 
-          self._updateParentsRecords( { op: 'insert', record: record }, function( err ){
+          // This will get called shortly. Bypasses straight to callback
+          // or calls reposition with right parameters and then calls callback
+          repositionIfNeeded = function( cb ){
+            if( ! self.positionField ){
+              cb( null );
+            } else {
+        
+              // If repositioning is required, do it
+              if( self.positionField ){
+                var where, beforeId;
+                if( ! options.position ){
+                  where = 'last';
+                } else {
+                  where = options.position.where;
+                  beforeId = options.position.beforeId;
+                }
+                self.reposition( recordWithLookups, where, beforeId, cb );
+              }
+            }
+          }
+          repositionIfNeeded( function( err ){
             if( err ) return cb( err );
 
-            if( ! options.returnRecord ) return cb( null );
-
-            self.collection.findOne( { _id: recordWithLookups._id }, self._projectionHash, function( err, doc ){
+            self._updateParentsRecords( { op: 'insert', record: record }, function( err ){
               if( err ) return cb( err );
 
-              if( doc !== null && typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
+              if( ! options.returnRecord ) return cb( null );
 
-              cb( null, doc );
+              // The insert operation might actually return a record (if returnRecord is on).
+              // In this case, projectionHash will need to also have _children in order to
+              // return the actual record with its _children
+              var projectionHash = {};
+              if( ! options.children ){
+                projectionHash = self._projectionHash;
+              } else {
+                for( var k in self._projectionHash ) projectionHash[ k ] = self._projectionHash[ k ];
+                projectionHash._children = true;
+              }
+
+              self.collection.findOne( { _id: recordWithLookups._id }, projectionHash, function( err, doc ){
+                if( err ) return cb( err );
+
+                // Clean up doc
+                if( doc !== null ){
+                  if( typeof( self._fieldsHash._id ) === 'undefined' ) delete doc._id;
+                  delete doc._clean;
+                }  
+
+                cb( null, doc );
+              });
             });
           });
         });
@@ -674,13 +876,22 @@ var TingoMixin = declare( null, {
   },
 
 
-  'delete': function( filters, options, cb ){
+  'delete': function( conditions, options, cb ){
 
     var self = this;
 
+    // This is such a common mistake, I will make thins work and give out a warning
+    if( conditions.conditions ){
+      console.warn( "(In delete) update and delete methods only accept conditions, not filters. Refer to documentation of SimpleDbLayer. This query will still work, but possibly not as expected (ranges and limits are not applied)" );
+      conditions = conditions.conditions;
+    }
+
+    // Make up a `filter` object; note that only `condition` will ever be passed to _makeMongoParameters
+    var filters = { conditions: conditions };
+
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
-    consolelog( rnd, "ENTRY: delete for ", self.table, ' => ', filters );
+    consolelog( rnd, "ENTRY: delete for ", self.table, ' => ', require('util').inspect( filters, { depth: 10 }  ) );
 
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
@@ -692,11 +903,12 @@ var TingoMixin = declare( null, {
 
     // Run the query
     try { 
-      var mongoParameters = this._makeTingoParameters( filters );
+      var mongoParameters = this._makeMongoParameters( filters );
     } catch( e ){
       return cb( e );
     }
 
+    consolelog("DELETE SELECTOR: ", mongoParameters.querySelector );
     // If options.multi is off, then use findAndModify which will accept sort
     if( !options.multi ){
       self.collection.findAndRemove( mongoParameters.querySelector, mongoParameters.sortHash, function( err, doc ) {
@@ -718,7 +930,9 @@ var TingoMixin = declare( null, {
     // If options.multi is on, then "sorting" doesn't make sense, it will just use mongo's "remove"
     } else {
       self.collection.remove( mongoParameters.querySelector, { single: false }, function( err, total ){
- 
+
+        consolelog("TOTAL FOR SELECTOR: ", total, mongoParameters.querySelector );
+  
         self._updateParentsRecords( { op: 'deleteMany', filters: filters }, function( err ){
           if( err ) return cb( err );
          
@@ -730,22 +944,15 @@ var TingoMixin = declare( null, {
 
   },
 
-  reposition: function( record, moveBeforeId, cb ){
-
+  reposition: function( record, where, beforeId, cb ){
 
     // No position field: nothing to do
     if( ! this.positionField ){
-       consolelog("No positionField for this table:", this.table );
+       consolelog("No positionField for this table, skipping repositioning altogether: ", this.table );
        return cb( null );
     }
-
-    // moveBeforeId is 
-    if( typeof( moveBeforeId ) === 'undefined' ){
-       consolelog("beforeId is undefined, skipping repositioning" );
-       return cb( null );
-    }
-
-    consolelog("Repositioning:", record );
+    
+    consolelog("Reposition called on ", record, " to be moved here:", where, "With beforeId being", beforeId );
 
     function moveElement(array, from, to) {
       if( to !== from ) array.splice( to, 0, array.splice(from, 1)[0]);
@@ -753,6 +960,7 @@ var TingoMixin = declare( null, {
 
     var self = this;
 
+    var one = false;
     var positionField = self.positionField;
     var idProperty = self.idProperty;
     var conditionsHash = {};
@@ -761,13 +969,15 @@ var TingoMixin = declare( null, {
     var updateCalls = [];
 
     // Make up conditionsHash based on the positionBase array
-    var conditionsHash = { and: [] };
-    for( var i = 0, l = self.positionBase.length -1; i < l; i ++ ){
+    var conditionsHash = { name: 'and', args: [] };
+    for( var i = 0, l = self.positionBase.length; i < l; i ++ ){
       var positionBaseField = self.positionBase[ i ];
-      conditionsHash.and.push( { field: positionBaseField, type: 'eq', value: record[ positionBaseField ] } );
+      conditionsHash.args.push( { name: 'eq', args: [ positionBaseField, record[ positionBaseField ] ] } );
+      one = true;
     }
+    if( !one ) conditionsHash = {}; 
 
-    consolelog("Repositioning basing it on", positionField, "idProperty: ", idProperty, "id: ", id, "to go after:", moveBeforeId );
+    consolelog("Repositioning basing it on", positionField, "conditionsHash:", conditionsHash, "positionBase: ", self.positionBase, "idProperty: ", idProperty, "id: ", id );
 
     // Run the select, ordered by the positionField and satisfying the positionBase
     var sortParams = { };
@@ -777,19 +987,20 @@ var TingoMixin = declare( null, {
 
       consolelog("Data before: ", data );
       
-      // Working out `from` and `to` as positional numbers
+      // Working out `from` as a potitional number in the array
       var from, to;
       data.forEach( function( a, i ){ if( a[ idProperty ].toString() == id.toString() ) from = i; } );
-      consolelog("Move before ID: ", moveBeforeId, typeof( moveBeforeId )  );
-      if( typeof( moveBeforeId ) === 'undefined' || moveBeforeId === null ){
-        consolelog( "moveBeforeId was null, 'to' will be:" , data.length );
-        to = data.length;
-      } else {
-        consolelog("moveBeforeId was passed, looking for item...");
-        data.forEach( function( a, i ){ if( a[ idProperty ].toString() == moveBeforeId.toString() ) to = i; } );
+
+      // Set 'from' and 'to' depending on parameters
+      switch( where ){
+        case 'first':  to = 0; break;
+        case 'last': to = data.length; break;
+        case 'before':
+          data.forEach( function( a, i ){ if( a[ idProperty ].toString() == beforeId.toString() ) to = i; } );
+        break;
       }
 
-      consolelog("from: ", from, ", to: ", to );
+      consolelog("FROM AND TO AFTER READING PARAMETERS: from: ", from, ", to: ", to );
 
       // Actually move the elements
       if( typeof( from ) !== 'undefined' && typeof( to ) !== 'undefined' ){
@@ -819,7 +1030,6 @@ var TingoMixin = declare( null, {
         
         // Runs the updates in series, calling the final callback at the end
         async.series( updateCalls , cb );
-        // cb( null );
 
       } else {
 
@@ -848,10 +1058,7 @@ var TingoMixin = declare( null, {
     //consolelog("MONGODB: Called makeIndex in collection ", this.table, ". Keys: ", keys );
     var opt = {};
 
-    consolelog("Making indexes for table", this.table, "and keys:");
-    consolelog( keys );
-    consolelog("And options:");
-    consolelog( options );
+    consolelog("INDEXING", this.table, "index name:", name, "with keys:", keys, ' options:', options );
 
     if( typeof( options ) === 'undefined' || options === null ) options = {};
     opt.background = !!options.background;
@@ -874,126 +1081,153 @@ var TingoMixin = declare( null, {
   // its children directly, and the children's fields also need to be indexed within the parent).
   // In normal circumstances, just scan the layer's schema for anything `searchable`.
 
+  _addAllPrefixes: function( s, prefix ){
+
+    if( prefix ) s = prefix + '.' + s;
+
+    // Add the __uc prefix (if necessary)
+    if( this._isSearchableAsString( s ) ) {
+      s = this._addUcPrefixToPath( s );
+    }
+    // Turn it into a proper field path (it will only affect fields with "." in them)
+    s = this._addChildrenPrefixToPath( s );
+
+    return s;
+  },
+
+  _makeSignature: function( o ){
+    var s = '';
+    Object.keys( o ).sort().forEach( function( k ) { s += k; } );
+    return s;
+  },
+
   generateSchemaIndexes: function( options, cb ){
 
     var self = this;
     var indexMakers = [];
+    //var allIndexes = {};
+    var allIndexes = [];
 
+    // Normalise options
     var opt = {};
-    if( options.background ) opt.background = false;
+    if( options.background ) opt.background = true;
+      
 
     consolelog("Run generateSchemaIndexes for table", self.table );
 
-    /*
+    consolelog("\nindexGroups for: ", self.table );
+    consolelog( require('util').inspect( self._indexGroups, { depth: 10 }  ));
+    consolelog("[END]");
 
-     Go through all of the index groups for this table.
-     Assume you have schemas as follows:
-
-     people = declare( DbLayer, {
-
-       schema: new Schema({
-         workspaceId: { type: 'id', searchable: true },
-         id:          { type: 'id', searchable: true },
-         name:        { type: 'string', searchable: true },
-         surname:     { type: 'string', searchable: true },
-         age:         { type: 'number', searchable: true, sortable: true },
-       }),
-
-     });
-       
-     emails = declare( DbLayer, {
-
-       schema: new Schema({
-         workspaceId: { type: 'id', searchable; true },
-         id:          { type: 'id', searchable: true },
-         personId:    { type: 'id', searchable: true },
-         email:       { type: 'string', searchable: true },
-         active:      { type: 'boolean', searchable: true },
-         notes:       { type: 'string' }
-       }),
-
-     });
-
-     Also assume that `emails` is nested to `people`.
-
-     The end result will be:
-
-     // peopleSchema
-
-     _indexGroups = {
-       __main: {
-         searchable: { workspaceId: true, id: true, name: true, surname: true, age: true },
-       },
-
-       __emails: {
-         searchable: { workspaceId: true, id: true, personId: true, email: true, active: true },
-       }
-     }
-    */
-
-    consolelog("indexGroups for: ", self.table );
-    consolelog(self._indexGroups );
+    // ***********************************************************************
+    // Adding just the keys in indexBase. This is only for the main record,
+    // since any indexing of foreign keys in children data is wastage
+    // ***********************************************************************
+    var keysJustBase = {};
+    self._indexGroups.__main.indexBase.forEach( function( indexBaseField ){
+      indexBaseField = self._addAllPrefixes( indexBaseField, '' );
+      keysJustBase[ indexBaseField ] = 1;
+    });
+    consolelog("+++Adding searchable key (just base):", keysJustBase );
+    //allIndexes[ group + self._makeSignature( keysJustBase ) ] = { keys: keysJustBase, opt: opt };
+    allIndexes.push( { keys: keysJustBase, opt: opt, name: 'indexBase' } );
 
     // Go through each group
     Object.keys( self._indexGroups ).forEach( function( group ){
 
       var indexGroup = self._indexGroups[ group ];
 
-      consolelog("Dealing with group: ", group );
+      consolelog("\n\nDealing with group: ", group, indexGroup );
 
       // Sets the field prefix. For __main, it's empty.
-      fieldPrefix = group === '__main' ? '' : group + '.';
+      fieldPrefix = group === '__main' ? '' : group;
 
       consolelog("fieldPrefix:", fieldPrefix );
 
-      // Go through `searchable` values. For each one,
-      // add the index.
+      // Goes through every group...
+      Object.keys( indexGroup.indexes ).forEach( function( indexName ){
 
-      Object.keys( indexGroup.searchable ).forEach( function( searchable ){
 
-        consolelog("Searchable field:", searchable );
+        var indexData = indexGroup.indexes[ indexName ];
+        consolelog("ENTRY:", indexName, indexData );
 
-        var entryValue = indexGroup.searchable[ searchable ];
-        consolelog("Entry valu:", entryValue );
+        // Make up the index options, mixing opt and indexData.options
+        var indexOptions = {};
+        for( var k in opt ) indexOptions[ k ] = opt[ k ];
+        for( var k in indexData.options ) indexOptions[ k ] = indexData.options[ k ];          
 
-        // Add the __uc prefix (if necessary), as well as the
-        // path prefix (in case it's not __main)
-        if( entryValue === 'upperCase' ){
-          searchable = self._addUcPrefixToPath( searchable );
-        }
-        searchable = fieldPrefix + searchable;
+        // Work out indexName with prefix
+        var indexNameWithPrefix = fieldPrefix == '' ? indexName: fieldPrefix + "_" + indexName;
 
-        // Turn it into a proper field path (it will only affect fields with "." in them)
-        searchable = self._makeTingoFieldPath( searchable );
-
-        var indexKeys = {};
-
-        // Adding index maker for the straight search
-        indexKeys[ searchable ] = 1;
-        indexMakers.push( function( cb ){
-          consolelog("Running makeIndex for table/keys:", self.table, indexKeys );
-          self.makeIndex( indexKeys, null, opt, cb );
+        // ******************************
+        // Adding keys without base
+        // ******************************        
+        var keysSearchable = {};
+        Object.keys( indexData.fields ).forEach( function( fieldName ){
+          var entryData = indexData.fields[ fieldName ];
+          fieldName = self._addAllPrefixes( fieldName, fieldPrefix );
+          keysSearchable[ fieldName ] = entryData.direction;
         });
+        consolelog("+++ADDING ", indexNameWithPrefix, keysSearchable, indexData.options );
+        allIndexes.push( { name: indexNameWithPrefix, keys: keysSearchable, opt: indexOptions } );
 
-      });
+        // **********************************************************************************
+        // Making up the same index as keysSearchable, but with indexBase as a starting point
+        // **********************************************************************************
+        if( indexGroup.indexBase.length && fieldPrefix == '' ){
+
+          consolelog("indexBase is not empty:", indexGroup.indexBase );
+
+          // Make up the base bit
+          var keysSearchableWithBase = {};
+          indexGroup.indexBase.forEach( function( indexBaseField ){
+            indexBaseField = self._addAllPrefixes( indexBaseField );
+            keysSearchableWithBase[ indexBaseField ] = 1;
+          });
+          
+          // Add the searchable part (borriwing it from above)
+          for( var k in keysSearchable ) keysSearchableWithBase[ k ] = keysSearchable[ k ];
+
+          // Make up the index, but only the resulting key is longer than indexBase itself
+          // (E.g. indexbase is { workspaceId: 1, personId: 1 } and are indexing personId: the new
+          // field will just overwrite one in indexBase, and as a result without this check it would just
+          // index indexBase again)
+          if( Object.keys( keysSearchableWithBase ).length > indexGroup.indexBase.length ){
+            consolelog("+++ADDING searchable key (with base):", 'base_' + indexName, keysSearchableWithBase,indexData.options );
+            allIndexes.push( { name: 'base_' + indexName, keys: keysSearchableWithBase, opt: indexOptions } );
+          } else {
+            consolelog("+++NOT ADDING searchable key (with base), overlapping:", 'base_' + indexName );
+          }
+
+        }
+      });    
     });
 
-
+    // ***********************************************************************
     // Add index for positionField, keeping into account positionBaseField
-    var keys = {};
+    // ***********************************************************************
+    var keysForPosition = {};
     self.positionBase.forEach( function( positionBaseField ){
-      keys[ positionBaseField ] = 1;
+      keysForPosition[ positionBaseField ] = 1;
     });
-    keys[ self.positionField ] = 1;
-    indexMakers.push( function( cb ){
-      self.makeIndex( keys, null, opt, cb );
-    });
+    keysForPosition[ self.positionField ] = 1;
+    consolelog("Keys for position hash:", keysForPosition );
+    //allIndexes[ '__main' + self._makeSignature( keysForPosition ) ] = { keys: keysForPosition, opt: opt };
+    allIndexes.push( { keys: keysForPosition, opt: opt, name: '_positionIndex' } );
 
-    // All done: now _actually_ create the indexes
-    // (indexMarkers is an array of callbacks, each one creating one index)
-    async.series( indexMakers, cb );
+    consolelog("At this point, allIndexes is:" );
+    consolelog( allIndexes );
+
+    // Actually make the indexes
+    async.eachSeries(
+      allIndexes,
+      function( item, cb ){
+        self.makeIndex( item.keys, item.name, item.opt, cb );
+      },
+      cb
+    );
+
   },
-
 
   // ******************************************************************
   // ******************************************************************
@@ -1003,7 +1237,7 @@ var TingoMixin = declare( null, {
   // **** These functions are here to address mongoDb's lack of    ****
   // **** joins by manipulating records' contents when a parent    ****
   // **** record is added, as well as helper functions for         ****
-  // **** the lack, in TingoDB, of case-independent searches.      ****
+  // **** the lack, in MongoDB, of case-independent searches.      ****
   // ****                                                          ****
   // **** For lack of  case-insensitive search, the layer creates  ****
   // **** __uc__ fields that are uppercase equivalent of 'string'  ****
@@ -1015,7 +1249,7 @@ var TingoMixin = declare( null, {
   // **** array in _children updated with the new email address    ****
   // **** added. This means that when fetching records, you        ****
   // **** _automatically_ and _immediately_ have its children      ****
-  // **** loaded. It also means that it's possible, in TingoDb,    ****
+  // **** loaded. It also means that it's possible, in MongoDb,    ****
   // **** to search for fields in the direct children              ****
   // **** I took great care at moving these functions here         ****
   // **** because these are the functions that developers of       ****
@@ -1024,8 +1258,7 @@ var TingoMixin = declare( null, {
   // ******************************************************************
   // ******************************************************************
 
-
-  _deleteUcFieldsfromChildren: function( _children ){
+  _deleteUcFieldsAndCleanfromChildren: function( _children ){
     var self = this;
 
     for( var k in _children ){
@@ -1033,9 +1266,11 @@ var TingoMixin = declare( null, {
       if( Array.isArray( child ) ){
         for( var i = 0, l = child.length; i < l; i++ ){
           self._deleteUcFields( child[ i ] );
+          delete child[ i ]._clean;
         }
       } else {
         self._deleteUcFields( child );
+        delete child._clean;
       }
     };
   },
@@ -1055,46 +1290,19 @@ var TingoMixin = declare( null, {
     var self = this;
 
     for( var k in record ){
-      if( self._searchableHash[ k ] === 'upperCase' ){
+      if( self._isSearchableAsString( k ) ){
         record[ '__uc__' + k ] = record[ k ].toUpperCase();
       }
     }
   },
 
-  // If there are ".", then some children records are being referenced.
-  // The actual way they are placed in the record is in _children; so,
-  // add _children where needed.
-  _makeTingoFieldPath: function( s ){
-
-    if( s.match(/\./ ) ){
-
-      var l = s.split( /\./ );
-      for( var i = 0; i < l.length-1; i++ ){
-        l[ i ] = '_children.' + l[ i ];
-      }
-      return l.join( '.' );
-
-    } else {
-      return s;
-    }
-   
-  },
-
-  _addUcPrefixToPath: function( s ){
-    var a = s.split('.');
-    a[ a.length - 1 ] = '__uc__' + a[ a.length - 1 ];
-    return a.join('.');
-  },
-
-
-
-  _makeRecordWithLookups: function( record, cb ){
+  _completeRecord: function( record, cb ){
 
     var self = this;
 
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
-    consolelog( rnd, "ENTRY:  _makeRecordWithLookups for ", self.table, 'record:',  record );
+    consolelog( rnd, "ENTRY:  _completeRecord for ", self.table, 'record:',  record );
 
     var recordWithLookups = {};
 
@@ -1106,70 +1314,40 @@ var TingoMixin = declare( null, {
     // Each added record needs to be ready for its _children
     recordWithLookups._children = {};
 
-    // Prepare the ground: for each child table of type "multiple", add an
-    // empty value in recordWithLookups.[children & searchData] as an empty
-    // array. Future updates and inserts might add/delete/update records in there
-    Object.keys( self.childrenTablesHash ).forEach( function( k ){
-      if( self.childrenTablesHash[ k ].nestedParams.type === 'multiple' ){
-        recordWithLookups._children[ k ] = [];
-      } 
-    });
-
     // Cycle through each lookup child of the current record,
     async.eachSeries(
-      Object.keys( recordWithLookups ),
+      Object.keys( self.multipleChildrenTablesHash ),
 
       function( recordKey, cb ){
-      
-        //consolelog( rnd, "Checking that field", recordKey, "is actually a lookup table...");
-        if( ! self.lookupChildrenTablesHash[ recordKey ] ){
-          //consolelog( rnd, "It isn't! Ignoring it...");
-          return cb( null );
-        } else {
-          consolelog( rnd, "It is! Processing it...");
-          consolelog( rnd, recordKey, "Is a lookup table!");
-
-          var childTableData = self.lookupChildrenTablesHash[ recordKey ];
-
-          var childLayer = childTableData.layer;
-          var nestedParams = childTableData.nestedParams;
-
-          consolelog( rnd, "Working on ", childTableData.layer.table );
-          consolelog( rnd, "Getting children data in child table ", childTableData.layer.table," for field ", nestedParams.parentField ," for record", recordWithLookups );
-
-          // EXCEPTION: check if the record being looked up isn't the same as the one
-          // being added. This is an edge case, but it's nice to cover it
-          if( childLayer.table === self.table && recordWithLookups[ self.idProperty ] === recordWithLookups[ recordKey ] ){
-
-            // Make up a temporary copy of the record, to which _children and __uc__ fields
-            // will be added
-            var t = {};
-            for( var k in record ) t[ k ] = record[ k ];
-            childLayer._addUcFields( t );
-            t._children = {};
-            recordWithLookups._children[ recordKey ] = t;
+     
+        consolelog( rnd, "Working on multiple table:", recordKey);
         
-            return cb( null );
-          }
+        consolelog( rnd, recordKey, "Is a multiple table!");
 
-          // Get children data for that child table
-          // ROOT to _getChildrenData
-          self._getChildrenData( recordWithLookups, recordKey, function( err, childData){
-            if( err ) return cb( err );
+        var childTableData = self.multipleChildrenTablesHash[ recordKey ];
 
-            childLayer._addUcFields( childData );
-            childData._children = {};
+        var childLayer = childTableData.layer;
+        var nestedParams = childTableData.nestedParams;
 
-            consolelog( rnd, "The childData data is:", childData );
+        consolelog( rnd, "Working on ", childTableData.layer.table );
+        consolelog( rnd, "Getting children data (multiple) in child table ", childTableData.layer.table, "for record", recordWithLookups );
 
-             // Make the record uppercase since it's for a search
-            recordWithLookups._children[ recordKey ] = childData;
+        // Get children data for that child table
+        // ROOT to _getChildrenData
+        self._getChildrenData( recordWithLookups, recordKey, function( err, childData){
+          if( err ) return cb( err );
 
-            // That's it!
-            cb( null );
-          });
+          // childLayer._addUcFields( childData );
+          // childData._children = {};
 
-        }
+          consolelog( rnd, "The childData data is:", childData );
+
+          // Make the record uppercase since it's for a search
+          recordWithLookups._children[ recordKey ] = childData;
+
+          // That's it!
+          cb( null );
+        });
       },
 
       // End of cycle: function can continue
@@ -1177,24 +1355,89 @@ var TingoMixin = declare( null, {
       function( err ){
         if( err ) return cb( err );
 
-        consolelog( rnd, "About to insert. At this point, recordWithLookups is:", recordWithLookups );
+        consolelog( rnd, "Multiple record lookup in insert done. At this point, recordWithLookups is:", recordWithLookups );
 
-        cb( null, recordWithLookups );
+        // Cycle through each lookup child of the current record,
+        async.eachSeries(
+          Object.keys( self.lookupChildrenTablesHash ),
+
+          function( recordKey, cb ){
+     
+            consolelog( rnd, "Working on lookup table:", recordKey);
+ 
+            var childTableData = self.lookupChildrenTablesHash[ recordKey ];
+
+            var childLayer = childTableData.layer;
+            var nestedParams = childTableData.nestedParams;
+
+            consolelog( rnd, "Working on ", childTableData.layer.table );
+            consolelog( rnd, "Getting children data (lookup) in child table ", childTableData.layer.table," for field ", nestedParams.localField ," for record", recordWithLookups );
+
+            // EXCEPTION: check if the record being looked up isn't the same as the one
+            // being added. This is an edge case, but it's nice to cover it
+            if( childLayer.table === self.table && recordWithLookups[ self.idProperty ] === recordWithLookups[ recordKey ] ){
+
+              // Make up a temporary copy of the record, to which _children and __uc__ fields
+              // will be added
+              var t = {};
+              for( var k in record ) t[ k ] = record[ k ];
+              childLayer._addUcFields( t );
+              t._children = {};
+              recordWithLookups._children[ recordKey ] = t;
+        
+              return cb( null );
+            }
+
+            // Get children data for that child table
+            // ROOT to _getChildrenData
+            self._getChildrenData( recordWithLookups, recordKey, function( err, childData){
+              if( err ) return cb( err );
+
+              if( childData ){
+              
+                childLayer._addUcFields( childData );
+                childData._children = {};
+
+                consolelog( rnd, "The childData data is:", childData );
+
+                 // Make the record uppercase since it's for a search
+                recordWithLookups._children[ recordKey ] = childData;
+              }
+
+              // That's it!
+              cb( null );
+            });
+          },
+
+          // End of cycle: function can continue
+
+          function( err ){
+            if( err ) return cb( err );
+
+            consolelog( rnd, "completeRecord done. At this point, recordWithLookups is:", recordWithLookups );
+
+            cb( null, recordWithLookups );
+          }
+        );
+
       }
     );
+
   },
 
-  _makeUpdateObjectWithLookups: function( updateObject, cb ){
+  _makeUpdateAndUnsetObjectWithLookups: function( updateObject, unsetObject, cb ){
     var self = this;
 
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
-    consolelog( rnd, "ENTRY:  _makeUpdateObjectWithLookups for ", self.table, 'updateObject:',  updateObject );
+    consolelog( rnd, "ENTRY:  _makeUpdateAndUnsetObjectWithLookups for ", self.table, 'updateObject:',  updateObject );
 
     // Make a copy of the original updateObject. The copy will be
     // enriched and will then be returned
     var updateObjectWithLookups = {};
     for( var k in updateObject ) updateObjectWithLookups[ k ] = updateObject[ k ];
+    var unsetObjectWithLookups = {};
+    for( var k in unsetObject ) unsetObjectWithLookups[ k ] = unsetObject[ k ];
 
     // This is only for aesthetic purposes. In an update, the update object
     // "is" the record (although it might be a partial version of it)
@@ -1202,12 +1445,14 @@ var TingoMixin = declare( null, {
 
     // Cycle through each lookup child of the update object
     async.eachSeries(
-      Object.keys( record ),
+      Object.keys( self.lookupChildrenTablesHash ),
 
       function( recordKey, cb ){
       
         //consolelog( rnd, "Checking that field", recordKey, "is actually a lookup table...");
-        if( ! self.lookupChildrenTablesHash[ recordKey ] ){
+        // ...and that it's defined in the record itself (it might be a partial update)
+        //if( ! self.lookupChildrenTablesHash[ recordKey ] ){
+        if( ! self.lookupChildrenTablesHash[ recordKey ] || typeof( record[ recordKey ] ) === 'undefined' ){
           //consolelog( rnd, "It isn't! Ignoring it...");
           return cb( null );
         } else {
@@ -1219,22 +1464,40 @@ var TingoMixin = declare( null, {
           var nestedParams = childTableData.nestedParams;
 
           consolelog( rnd, "Working on ", childTableData.layer.table );
-          consolelog( rnd, "Getting children data in child table ", childTableData.layer.table," for field ", nestedParams.parentField ," for record", record );
+          consolelog( rnd, "Getting children data in child table ", childTableData.layer.table," for field ", nestedParams.localField ," for record", record );
 
           // Get children data for that child table
           // ROOT to _getChildrenData
           self._getChildrenData( record, recordKey, function( err, childData){
             if( err ) return cb( err );
 
-            childLayer._addUcFields( childData );
-            childData._children = {};
+            if( childData ){
 
-            consolelog( rnd, "The childData data is:", childData );
+              // Add uppercase fields
+              childLayer._addUcFields( childData );
 
-            updateObjectWithLookups[ '_children.' + recordKey ] = childData;
+              // Add _children to childData, as it's expected a lot of times
+              childData._children = {};
 
-            // That's it!
-            cb( null );
+              // Make up the updateObjectWithLookup object with the new childData
+              updateObjectWithLookups[ '_children.' + recordKey ] = childData;
+
+              // That's it!
+              cb( null );
+            } else {
+
+              // Watch out: protected fields mustn't be overwritten by an update
+              if( ! self.schema.structure[ recordKey ].protected ){
+
+                // Make up the unsetObjectWithLookup object with the new childData
+                unsetObjectWithLookups[ '_children.' + recordKey ] = 1;
+              }
+
+              // That's it!
+              cb( null );
+      
+            }
+
           });
 
         }
@@ -1245,7 +1508,7 @@ var TingoMixin = declare( null, {
       function( err ){
         if( err ) return cb( err );
 
-        cb( null, updateObjectWithLookups );
+        cb( null, updateObjectWithLookups, unsetObjectWithLookups );
       }
     );
 
@@ -1273,90 +1536,64 @@ var TingoMixin = declare( null, {
     consolelog( rnd, "ENTRY: _getChildrenData for ", field, ' => ', record );
     //consolelog( rnd, "Comparing with:", Object.keys( rootTable.autoLoad ) );
 
-    // Little detail forgotten by accident
-    var resultObject;
-
     var childTableData = self.childrenTablesHash[ field ]; 
 
-    // If it's a lookup, it will be v directly. This will cover cases where a new call
-    // is made straight on the lookup
     switch( childTableData.nestedParams.type ){
 
       case 'multiple':
         consolelog( rnd, "Child table to be considered is of type MULTIPLE" );
-        resultObject = [];
+
+        // JOIN QUERY (direct)
+        var mongoSelector = {};
+        Object.keys( childTableData.nestedParams.join ).forEach( function( joinKey ){
+          var joinValue = childTableData.nestedParams.join[ joinKey ]
+          mongoSelector[ joinKey ] = record[ joinValue ];
+        });
+        
+        consolelog( rnd, "Running the select with selector:", mongoSelector, "on table", childTableData.layer.table );
+
+        // Runs the query, which will get the children element for that
+        // child table depending on the join
+        childTableData.layer.collection.find( mongoSelector, childTableData.layer._projectionHash ).toArray( function( err, res ){
+          if( err ) return cb( err );
+
+          var deleteId = typeof( childTableData.layer._fieldsHash._id ) === 'undefined';
+          res = res.map( function( item ) {
+            if( deleteId ) delete item._id;
+            delete item._clean;
+          });
+          cb( null, res );
+        });
       break;
 
       case 'lookup':
+
         consolelog( rnd, "Child table to be considered is of type LOOKUP" );
-        resultObject = {};
-      break;
-    }
-   
-    // JOIN QUERY (direct)
-    var mongoSelector = {};
-    Object.keys( childTableData.nestedParams.join ).forEach( function( joinKey ){
-      var joinValue = childTableData.nestedParams.join[ joinKey ]
-      mongoSelector[ joinKey ] = record[ joinValue ];
-    });
-    
-    consolelog( rnd, "Running the select with selector:", mongoSelector, "on table", childTableData.layer.table );
 
-    // Runs the query, which will get the children element for that
-    // child table depending on the join
-    //childTableData.layer.collection.find( { conditions: { and: andConditionsArray } }, function( err, res, total ){
-    childTableData.layer.collection.find( mongoSelector, childTableData.layer._projectionHash ).toArray( function( err, res ){
-      if( err ) return cb( err );
+        // JOIN QUERY (direct)
+        var mongoSelector = {};
+        mongoSelector[ childTableData.nestedParams.layerField ] = record[ childTableData.nestedParams.localField ];
 
-      consolelog( rnd, "Records fetched:", res );
-   
-      // For each result, add them to resultObject
-      async.eachSeries(
-        res,
-    
-        function( item, cb ){
+        consolelog( rnd, "Running the select with selector:", mongoSelector, "on table", childTableData.layer.table );
 
-          // Since we are doing a find directly, we need to take out _id manually if
-          // it's not in the projection hash
-          if( typeof( childTableData.layer._fieldsHash._id ) === 'undefined' )  delete item._id;
-
-
-          consolelog( rnd, "Considering item:", item );
-   
-          // Assign the loaded item to the resultObject
-          // making sure that it's in the right spot (depending on the type)
-          switch( childTableData.nestedParams.type ){
-            case 'lookup':
-             //var loadAs = childTableData.nestedParams.loadAs ? childTableData.nestedParams.loadAs : childTableData.nestedParams.layer.table;
-             var loadAs = childTableData.nestedParams.parentField;
-             consolelog( rnd, "Item is a lookup, assigning resultobject[ ", loadAs,' ] to ', resultObject );
-             resultObject = item;
-            break;
-            case 'multiple':
-              consolelog( rnd, "Item is of type multiple, pushing it to", resultObject );
-              resultObject.push( item );
-            break;
-            default:
-              cb( new Error( "Parameter 'type' needs to be 'lookup' or 'multiple' " ) );
-            break;
-          };
-
-          consolelog( rnd, "resultObject after the cure is:", resultObject );
-
-          cb( null );
-            
-        },
-
-        function( err ){
+        // Runs the query, which will get the children element for that
+        // child table depending on the join
+        childTableData.layer.collection.find( mongoSelector, childTableData.layer._projectionHash ).toArray( function( err, res ){
           if( err ) return cb( err );
 
-          consolelog( rnd, "EXIT: End of function. Returning:", require('util').inspect( resultObject, { depth: 5 }  ) );
+          // Return null if it's a lookup and there are no results
+          if( res.length == 0 ){
+            return cb( null, null );
+          }
+          var r = res[ 0 ];
 
-          cb( null, resultObject );
-        }
-      ) // async.series
+          if( typeof( childTableData.layer._fieldsHash._id ) === 'undefined' ) delete r._id;
+          delete r._clean;
 
-    })
+          return cb( null, r );
+        });
+      break;
+    }
   },
 
 
@@ -1395,23 +1632,20 @@ var TingoMixin = declare( null, {
         var parentLayer = parentTableData.layer;
         var nestedParams = parentTableData.nestedParams;
 
-        
-        // If it's not meant to be searchable, skip it
-        //if( ! nestedParams.searchable && params.field === '_searchData' ){
-        //  consolelog( rnd, "Child table doesn't have searchable and _searchData was to be populated, skipping..." );
-        //  return cb( null );
-        //}
-
-        // Figure out what to pass as the second parameter of _getChildrenData: 
+        // Figure out the field name, relative to _children.XXXXX 
         // - For multiple, it will just be the table's name
-        // - For lookups, it will be the parentField value in nestedParams
+        // - For lookups, it will be the localField value in nestedParams
         var field;
         switch( nestedParams.type ){
           case 'multiple': field = self.table; break;
-          case 'lookup'  : field = nestedParams.parentField; break;
+          case 'lookup'  : field = nestedParams.localField; break;
           default        : return cb( new Error("The options parameter must be a non-null object") ); break;
         }
-        consolelog( rnd, "field for ", nestedParams.type, "is:", field );
+        consolelog( "FIELD:", field );
+        consolelog( "PARAMETERS:", nestedParams );
+        consolelog( "PARAMETERS TYPE:", nestedParams.type );
+
+        consolelog( rnd, "fielddd for ", nestedParams.type, "is:", field );
 
         /* THREE CASES:
           * CASE #1: Insert
@@ -1442,6 +1676,7 @@ var TingoMixin = declare( null, {
             Object.keys( nestedParams.join ).forEach( function( joinKey ){
               mongoSelector[ nestedParams.join[ joinKey ] ] = record[ joinKey ];
             });
+            mongoSelector._clean = true;
 
             // The updateRecord variable is the same as record, but with uc fields and _children added
             var insertRecord = {};
@@ -1499,6 +1734,7 @@ var TingoMixin = declare( null, {
 
             var selector = {};
             selector[ '_children.' + field + "." + self.idProperty ] = id;
+            selector._clean = true;
             consolelog( rnd, "SELECTOR:" );
             consolelog( rnd, selector );
 
@@ -1516,21 +1752,22 @@ var TingoMixin = declare( null, {
 
             consolelog( rnd, "CASE #2 (updateMany)", params.op );
 
-            // Sorry, can't. TingoDb bug #1243
+            // Sorry, can't. MongoDb bug #1243
             if( nestedParams.type === 'multiple' ){
-              cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Tingo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is unimplementable") );
+              return cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Mongo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is unimplementable") );
             }
+
+            // The rest is untested and untestable code (not till #1243 is solved)
 
             // Assign the parameters
             var filters = params.filters;
             var updateObject = params.updateObject;
             var unsetObject = params.unsetObject;
 
-
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeTingoParameters( filters, field );
-              // var mongoParameters = parentLayer._makeTingoParameters( filters );
+              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
+              // var mongoParameters = parentLayer._makeMongoParameters( filters );
             } catch( e ){
               return cb( e );
             }
@@ -1561,8 +1798,6 @@ var TingoMixin = declare( null, {
             
               return cb( null );
             });
-
-
           }
 
         // CASE #3 -- DELETE
@@ -1579,6 +1814,7 @@ var TingoMixin = declare( null, {
 
             var selector = {};
             selector[ '_children.' + field + "." + self.idProperty ] = id;
+            selector._clean = true;
 
             // It's a lookup field: it will assign an empty object
             if( nestedParams.type === 'lookup' ){
@@ -1617,32 +1853,43 @@ var TingoMixin = declare( null, {
             // Assign the parameters
             var filters = params.filters;
 
+            consolelog("Making filter...", filters, field );
+
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeTingoParameters( filters, field );
+              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
+            } catch( e ){
+              return cb( e );
+            }
+            var selector = { $and: [ { _clean: true }, mongoParameters.querySelector ] }
+
+            //console.log("!!!!!!!!!!!!!!!!!!!!!!!!!!!GOT HERE...", selector );
+
+            // Make up parameters from the passed filters
+            try {
+              var mongoParametersForPull = parentLayer._makeMongoParameters( filters, field, true );
             } catch( e ){
               return cb( e );
             }
 
-            // Make up parameters from the passed filters
-            try {
-              var mongoParametersForPull = parentLayer._makeTingoParameters( filters );
-            } catch( e ){
-              return cb( e );
-            }
-
+            consolelog("mongoParameters:", mongoParameters );
+            consolelog("mongoParametersForPull:", mongoParametersForPull );
 
             // The update object will depend on whether it's a push or a pull
             var updateObject = {};
 
             // It's a lookup field: it will assign an empty object
-            // Note that we don't need the "ugly hack" here (_mongoUglyUpdateWrapper) as the update
-            // only counts for one field per parent
             if( nestedParams.type === 'lookup' ){
+
+              consolelog("It's a lookup!");
+
               updateObject[ '$set' ] = {};
               updateObject[ '$set'] [ '_children.' + field ] = {};
 
-              parentLayer.collection.update( mongoParameters.querySelector, updateObject, { multi: true }, function( err, total ){
+              consolelog("Query Selector:", mongoParameters.querySelector );
+              consolelog("Update object:", updateObject );
+
+              parentLayer.collection.update( selector, updateObject, { multi: true }, function( err, total ){
                 if( err ) return cb( err );
                 consolelog( rnd, "deleted", total, "sub-records" );
 
@@ -1650,11 +1897,15 @@ var TingoMixin = declare( null, {
               });
 
             // It's a multiple one: it will $pull the elementS (with an S, plural) out
-            // Note that we don't need the "ugly hack" here (_mongoUglyUpdateWrapper) as the $pull operation in TingoDB
-            // takes a condition itself -- condition that I replicate
             } else {
+
+              consolelog("It's a multiple!");
+
               updateObject[ '$pull' ] = {};
               updateObject[ '$pull' ] [ '_children.' + field ] = mongoParametersForPull.querySelector;
+
+              consolelog("Query Selector:", mongoParameters.querySelector );
+              consolelog("Update object:", updateObject );
 
               parentLayer.collection.update( mongoParameters.querySelector, updateObject, { multi: true }, function( err, total ){
                 if( err ) return cb( err );
@@ -1687,15 +1938,16 @@ var TingoMixin = declare( null, {
 });
 
 // The default id maker
-TingoMixin.makeId = function( id, cb ){
+MongoMixin.makeId = function( id, cb ){
   if( id === null ){
     cb( null, ObjectId() );
   } else {
     cb( null, ObjectId( id ) );
   }
-},
+};
 
+debugger;
 
-
-exports = module.exports = TingoMixin;
+MongoMixin.registry = {};
+exports = module.exports = MongoMixin;
 
