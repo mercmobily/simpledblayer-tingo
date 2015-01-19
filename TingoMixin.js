@@ -14,7 +14,7 @@ var
   dummy
 
 , declare = require('simpledeclare')
-, engine = require("tingodb")({})
+, engine = require("tingodb")({ searchInArray: true })
 , async = require('async')
 , debug = require('debug')
 ;
@@ -1741,7 +1741,7 @@ var MongoMixin = declare( null, {
             parentLayer.collection.update( selector, { $set: relativeUpdateObject, $unset: relativeUnsetObject }, { multi: true }, function( err, total ){
               if( err ) return cb( err );
 
-              consolelog( rnd, "Updated:", total, "records" );
+              consolelog( rnd, "Updated:", total, "records with:", { $set: relativeUpdateObject, $unset: relativeUnsetObject } );
 
               return cb( null );
 
