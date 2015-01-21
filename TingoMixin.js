@@ -27,6 +27,9 @@ var ObjectId = function( id ){
 
 var consolelog = debug( 'simpledblayer:tingo');
 
+
+//Differenciation BW TingoDb and MongoDB starts here
+
 function _makeOperator( op ){
   return function( a, b ){
     var r = {};
@@ -461,12 +464,12 @@ var MongoMixin = declare( null, {
                   if( options.children ) var _children = obj._children;
                   var clean = obj._clean;
 
-                  self.schema.validate( obj, { deserialize: true }, function( err, obj, errors ){
+                  self.schema.validate( obj, { deserialize: true, ignoreFields: [ '_children', '_clean' ] }, function( err, obj, errors ){
 
                     // If there is an error, end of story
                     // If validation fails, call callback with self.SchemaError
                     if( err ) return cb( err );
-                    //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
+                    if( self.strictSchemaOnFetch && errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
 
                     // Re-add children, since it may be required later and was zapped by
                     // schema.validate()
@@ -560,9 +563,10 @@ var MongoMixin = declare( null, {
                 var clean = doc._clean;
 
                 changeFunctions.push( function( callback ){
-                  self.schema.validate( doc, { deserialize: true }, function( err, validatedDoc, errors ){
+                  self.schema.validate( doc, { deserialize: true, ignoreFields: [ '_children', '_clean' ] }, function( err, validatedDoc, errors ){
+
                     if( err ) return callback( err );
-                    //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
+                    if( self.strictSchemaOnFetch && errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
 
                     // Re-add children, since it may be required later and was zapped by
                     // schema.validate()
@@ -1741,7 +1745,7 @@ var MongoMixin = declare( null, {
             parentLayer.collection.update( selector, { $set: relativeUpdateObject, $unset: relativeUnsetObject }, { multi: true }, function( err, total ){
               if( err ) return cb( err );
 
-              consolelog( rnd, "Updated:", total, "records with:", { $set: relativeUpdateObject, $unset: relativeUnsetObject } );
+              consolelog( rnd, "Updated:", total, "records" );
 
               return cb( null );
 
@@ -1826,7 +1830,6 @@ var MongoMixin = declare( null, {
               updateObject[ '$pull' ] = {};
 
               var pullData = {};
-              // TODO: CHECK IF THIS SHOULD BE self.idProperty OR parentLayer.idProperty
               pullData[ self.idProperty  ] =  id ;
               updateObject[ '$pull' ] [ '_children.' + field ] = pullData;
             }
