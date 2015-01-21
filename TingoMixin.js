@@ -28,7 +28,7 @@ var ObjectId = function( id ){
 var consolelog = debug( 'simpledblayer:tingo');
 
 
-//Differenciation BW TingoDb and MongoDB starts here
+
 
 function _makeOperator( op ){
   return function( a, b ){
@@ -36,7 +36,7 @@ function _makeOperator( op ){
     r[ a ] = { };
     r[ a ][ op ] =  b;
     return r;
-  }
+  };
 }
 
 var MongoMixin = declare( null, {
@@ -154,7 +154,7 @@ var MongoMixin = declare( null, {
     return  {
       querySelector: this._makeMongoFilter( filters.conditions || {}, fieldPrefix, selectorWithoutBells ),
       sortHash:  this._makeMongoSortHash( filters.sort || {}, fieldPrefix )
-    }
+    };
   },
     
   // Converts `conditions` to a workable mongo filters. Most of the complexity of this
@@ -182,7 +182,7 @@ var MongoMixin = declare( null, {
       var r = {};
       r[ mongoName ] = conditions.args.map( function( item ){
         return self._makeMongoFilter( item, fieldPrefix, selectorWithoutBells );
-      })          
+      });
       return r;
 
     } else {
@@ -240,8 +240,9 @@ var MongoMixin = declare( null, {
 
     consolelog( "filters.sort is:", sort );        
     //consolelog( "_sortableHash is:", self._sortableHash );        
-    for( var field  in sort ) {
-      var sortDirection = sort[ field ]
+    for( var field  in sort ){
+      if( ! sort.hasOwnProperty( field) ) continue;
+      var sortDirection = sort[ field ];
 
       var searchableHashEntry = ( fieldPrefix ? fieldPrefix + '.' : '' ) + field;
       if( self._searchableHash[ searchableHashEntry ] || field === self.positionBaseField ){
@@ -251,7 +252,7 @@ var MongoMixin = declare( null, {
 
         // Check that it's searchable -- if not, it's not sortble either
         if( !self._searchableHash[ field ] ){
-          throw( new Error("Field " + dottedPath + " is not searchable, and therefore not sortable" ) );
+          throw( new Error("Field " + field + " is not searchable, and therefore not sortable" ) );
         }
 
         if( self._isSearchableAsString( field ) ){
@@ -281,8 +282,6 @@ var MongoMixin = declare( null, {
     self._completeRecord( obj, function( err, obj ){
       if( err ) return cb( err );
 
-      // The _id field cannot be updated. If it's there,
-      // simply delete it
       self._addUcFields( obj );
       obj._clean = true;  
 
@@ -291,7 +290,8 @@ var MongoMixin = declare( null, {
       updateQuery[ self.idProperty ] = obj[ self.idProperty ];
       self.collection.update( updateQuery, { $set: obj }, { multi: false }, function( err, total ){
         if( err ) return cb( err );
-
+        if( !total ) return cb( new Error("Record to be cleared not found") );
+        
         delete obj._clean;
         self._deleteUcFields( obj );
 
@@ -342,14 +342,15 @@ var MongoMixin = declare( null, {
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
       cb = options;
-      options = {}
+      options = {};
     } else if( typeof( options ) !== 'object' || options === null ){
       return cb( new Error("The options parameter must be a non-null object") );
     }
 
+    var mongoParameters;
     // Make up parameters from the passed filters
     try {
-      var mongoParameters = this._makeMongoParameters( filters );
+      mongoParameters = this._makeMongoParameters( filters );
     } catch( e ){
       return cb( e );
     }
@@ -376,7 +377,10 @@ var MongoMixin = declare( null, {
     //     means all of its _children are up to date) and
     // * _children  (which is the list of children, only if _children is true)
     var projectionHash = {};
-    for( var k in self._projectionHash ) projectionHash[ k ] = self._projectionHash[ k ];
+    for( var k in self._projectionHash ){
+      if( ! self._projectionHash.hasOwnProperty( k ) ) continue;
+      projectionHash[ k ] = self._projectionHash[ k ];
+    }
     if( options.children ) projectionHash._children = true;      
     projectionHash._clean = true;
    
@@ -397,7 +401,7 @@ var MongoMixin = declare( null, {
 
     // Sort the query
     cursor.sort( mongoParameters.sortHash , function( err ){
-      if( err ) return next( err );
+      if( err ) return cb( err );
 
       if( options.useCursor ){
 
@@ -480,13 +484,13 @@ var MongoMixin = declare( null, {
                     // Note that after this call obj._children may or may not get
                     // overwritten (depends wheter _cleanRecord gets skipped).
                     var skip = !options.children || clean; 
-                    self.cleanRecord( obj, skip, function( err ){
+                    self.cleanRecord( obj, skip, function( err, obj ){
                       if( err ) return done( err );
 
                       // Note: at this point, _children might be either the old existing one,
                       // or a new copy created by _cleanRecord
                       // At this point, sort out _children (which might get deleted
-                      // altogether or might need extra _uc__ fields) AND
+                      // altogether or might have extra _uc__ fields) AND
                       // get rid of obj._clean which isn't meant to be returned to the user
                       if( options.children) self._deleteUcFieldsAndCleanfromChildren( _children );
                       delete obj._clean;
@@ -575,13 +579,13 @@ var MongoMixin = declare( null, {
                     // If the object isn't clean, then it will trigger the _completeRecord
                     // call which will effectively complete the record with the right _children
                     var skip = clean || ! options.children;
-                    self.cleanRecord( validatedDoc, skip, function( err ){
+                    self.cleanRecord( validatedDoc, skip, function( err, validatedDoc ){
                       if( err ) return callback( err );
 
                       // Note: at this point, _children might be either the old existing one,
                       // or a new copy created by _cleanRecord
                       // At this point, sort out _children (which might get deleted
-                      // altogether or might need extra _uc__ fields) AND
+                      // altogether or might have extra _uc__ fields) AND
                       // get rid of obj._clean which isn't meant to be returned to the user
                       if( options.children) self._deleteUcFieldsAndCleanfromChildren( _children );
                       delete validatedDoc._clean;
@@ -589,7 +593,6 @@ var MongoMixin = declare( null, {
                       //if( errors.length ) return cb( new self.SchemaError( { errors: errors } ) );
                       queryDocs[ index ] = validatedDoc;
                        
-
                       callback( null );
                     });
 
@@ -619,7 +622,7 @@ var MongoMixin = declare( null, {
           });
 
         
-        })
+        });
 
       }
     
@@ -650,7 +653,7 @@ var MongoMixin = declare( null, {
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
       cb = options;
-      options = {}
+      options = {};
     } else if( typeof( options ) !== 'object' || options === null ){
       return cb( new Error("The options parameter must be a non-null object") );
     }
@@ -685,7 +688,7 @@ var MongoMixin = declare( null, {
 
       // The _id field cannot be updated. If it's there,
       // simply delete it
-      delete updateObject[ '_id' ];
+      delete updateObject._id;
 
       // Add __uc__ fields to the updateObject (they are the uppercase fields
       // used for filtering of string fields)
@@ -709,8 +712,9 @@ var MongoMixin = declare( null, {
       }
 
       // Make up parameters from the passed filters
+      var mongoParameters;
       try {
-        var mongoParameters = self._makeMongoParameters( filters );
+        mongoParameters = self._makeMongoParameters( filters );
       } catch( e ){
         return cb( e );
       }
@@ -757,7 +761,7 @@ var MongoMixin = declare( null, {
               cb( null, total );
             });
           });
-        };
+        }
 
       });
     });
@@ -768,8 +772,7 @@ var MongoMixin = declare( null, {
   insert: function( record, options, cb ){
 
     var self = this;
-    var recordWithLookups = {};
-
+ 
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
     consolelog( rnd, "ENTRY: insert for ", self.table, ' => ', record );
@@ -777,7 +780,7 @@ var MongoMixin = declare( null, {
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
       cb = options;
-      options = {}
+      options = {};
     } else if( typeof( options ) !== 'object' || options === null ){
       return cb( new Error("The options parameter must be a non-null object") );
     }
@@ -811,7 +814,7 @@ var MongoMixin = declare( null, {
         // so that record doesn't include an _id field when self._makeRecordWithLookups
         // is called (which would imply that $pushed, non-main children elements would also
         // have _id
-        if( typeof( recordWithLookups._id ) === 'undefined' ) recordWithLookups._id  = ObjectId();
+        if( typeof( recordWithLookups._id ) === 'undefined' ) recordWithLookups._id  = makeObjectId();
 
         recordWithLookups._clean = true;
 
@@ -824,7 +827,7 @@ var MongoMixin = declare( null, {
 
           // This will get called shortly. Bypasses straight to callback
           // or calls reposition with right parameters and then calls callback
-          repositionIfNeeded = function( cb ){
+          var repositionIfNeeded = function( cb ){
             if( ! self.positionField ){
               cb( null );
             } else {
@@ -841,7 +844,7 @@ var MongoMixin = declare( null, {
                 self.reposition( recordWithLookups, where, beforeId, cb );
               }
             }
-          }
+          };
           repositionIfNeeded( function( err ){
             if( err ) return cb( err );
 
@@ -857,7 +860,10 @@ var MongoMixin = declare( null, {
               if( ! options.children ){
                 projectionHash = self._projectionHash;
               } else {
-                for( var k in self._projectionHash ) projectionHash[ k ] = self._projectionHash[ k ];
+                for( var k in self._projectionHash ){
+                  if( !self._projectionHash.hasOwnProperty( k ) ) continue;
+                  projectionHash[ k ] = self._projectionHash[ k ];
+                }
                 projectionHash._children = true;
               }
 
@@ -900,14 +906,15 @@ var MongoMixin = declare( null, {
     // Usual drill
     if( typeof( cb ) === 'undefined' ){
       cb = options;
-      options = {}
+      options = {};
     } else if( typeof( options ) !== 'object' || options === null ){
       return cb( new Error("The options parameter must be a non-null object") );
     }
 
     // Run the query
+    var mongoParameters;
     try { 
-      var mongoParameters = this._makeMongoParameters( filters );
+      mongoParameters = this._makeMongoParameters( filters );
     } catch( e ){
       return cb( e );
     }
@@ -970,10 +977,8 @@ var MongoMixin = declare( null, {
     var conditionsHash = {};
     var id = record[ idProperty ];
 
-    var updateCalls = [];
-
     // Make up conditionsHash based on the positionBase array
-    var conditionsHash = { name: 'and', args: [] };
+    conditionsHash = { name: 'and', args: [] };
     for( var i = 0, l = self.positionBase.length; i < l; i ++ ){
       var positionBaseField = self.positionBase[ i ];
       conditionsHash.args.push( { name: 'eq', args: [ positionBaseField, record[ positionBaseField ] ] } );
@@ -1108,7 +1113,7 @@ var MongoMixin = declare( null, {
   generateSchemaIndexes: function( options, cb ){
 
     var self = this;
-    var indexMakers = [];
+    
     //var allIndexes = {};
     var allIndexes = [];
 
@@ -1144,7 +1149,7 @@ var MongoMixin = declare( null, {
       consolelog("\n\nDealing with group: ", group, indexGroup );
 
       // Sets the field prefix. For __main, it's empty.
-      fieldPrefix = group === '__main' ? '' : group;
+      var fieldPrefix = group === '__main' ? '' : group;
 
       consolelog("fieldPrefix:", fieldPrefix );
 
@@ -1155,13 +1160,21 @@ var MongoMixin = declare( null, {
         var indexData = indexGroup.indexes[ indexName ];
         consolelog("ENTRY:", indexName, indexData );
 
+        var k;
+        
         // Make up the index options, mixing opt and indexData.options
         var indexOptions = {};
-        for( var k in opt ) indexOptions[ k ] = opt[ k ];
-        for( var k in indexData.options ) indexOptions[ k ] = indexData.options[ k ];          
-
+        for( k in opt ){
+          if( !opt.hasOwnProperty( k ) ) continue;
+          indexOptions[ k ] = opt[ k ];
+        }
+        for( k in indexData.options ){
+          if( !indexData.options.hasOwnProperty( k ) ) continue;
+          indexOptions[ k ] = indexData.options[ k ];          
+        }
+        
         // Work out indexName with prefix
-        var indexNameWithPrefix = fieldPrefix == '' ? indexName: fieldPrefix + "_" + indexName;
+        var indexNameWithPrefix = fieldPrefix === '' ? indexName: fieldPrefix + "_" + indexName;
 
         // ******************************
         // Adding keys without base
@@ -1178,7 +1191,7 @@ var MongoMixin = declare( null, {
         // **********************************************************************************
         // Making up the same index as keysSearchable, but with indexBase as a starting point
         // **********************************************************************************
-        if( indexGroup.indexBase.length && fieldPrefix == '' ){
+        if( indexGroup.indexBase.length && fieldPrefix === '' ){
 
           consolelog("indexBase is not empty:", indexGroup.indexBase );
 
@@ -1190,8 +1203,10 @@ var MongoMixin = declare( null, {
           });
           
           // Add the searchable part (borriwing it from above)
-          for( var k in keysSearchable ) keysSearchableWithBase[ k ] = keysSearchable[ k ];
-
+          for( k in keysSearchable ){
+            if( !keysSearchable.hasOwnProperty( k ) ) continue;
+            keysSearchableWithBase[ k ] = keysSearchable[ k ];
+          }
           // Make up the index, but only the resulting key is longer than indexBase itself
           // (E.g. indexbase is { workspaceId: 1, personId: 1 } and are indexing personId: the new
           // field will just overwrite one in indexBase, and as a result without this check it would just
@@ -1266,6 +1281,7 @@ var MongoMixin = declare( null, {
     var self = this;
 
     for( var k in _children ){
+      if( !_children.hasOwnProperty( k ) ) continue;
       var child = _children[ k ];
       if( Array.isArray( child ) ){
         for( var i = 0, l = child.length; i < l; i++ ){
@@ -1276,16 +1292,13 @@ var MongoMixin = declare( null, {
         self._deleteUcFields( child );
         delete child._clean;
       }
-    };
+    }
   },
 
    _deleteUcFields: function( record ){
-    var self = this;
-
     for( var k in record ){
       if( k.substr( 0, 6 ) === '__uc__' ) delete record[ k ];
     }
-
   },
 
  
@@ -1312,6 +1325,7 @@ var MongoMixin = declare( null, {
 
     // Prepare recordWithLookups, as a copy of record
     for( var k in record ){
+      if( !record.hasOwnProperty( k ) ) continue;
       recordWithLookups[ k ] = record[ k ];
     }
 
@@ -1330,8 +1344,8 @@ var MongoMixin = declare( null, {
 
         var childTableData = self.multipleChildrenTablesHash[ recordKey ];
 
-        var childLayer = childTableData.layer;
-        var nestedParams = childTableData.nestedParams;
+        //var childLayer = childTableData.layer;
+        //var nestedParams = childTableData.nestedParams;
 
         consolelog( rnd, "Working on ", childTableData.layer.table );
         consolelog( rnd, "Getting children data (multiple) in child table ", childTableData.layer.table, "for record", recordWithLookups );
@@ -1340,9 +1354,6 @@ var MongoMixin = declare( null, {
         // ROOT to _getChildrenData
         self._getChildrenData( recordWithLookups, recordKey, function( err, childData){
           if( err ) return cb( err );
-
-          // childLayer._addUcFields( childData );
-          // childData._children = {};
 
           consolelog( rnd, "The childData data is:", childData );
 
@@ -1384,7 +1395,10 @@ var MongoMixin = declare( null, {
               // Make up a temporary copy of the record, to which _children and __uc__ fields
               // will be added
               var t = {};
-              for( var k in record ) t[ k ] = record[ k ];
+              for( var k in record ){
+                if( !record.hasOwnProperty( k ) ) continue;
+                t[ k ] = record[ k ];
+              }
               childLayer._addUcFields( t );
               t._children = {};
               recordWithLookups._children[ recordKey ] = t;
@@ -1431,7 +1445,8 @@ var MongoMixin = declare( null, {
 
   _makeUpdateAndUnsetObjectWithLookups: function( updateObject, unsetObject, cb ){
     var self = this;
-
+    var k;
+    
     var rnd = Math.floor(Math.random()*100 );
     consolelog( "\n");
     consolelog( rnd, "ENTRY:  _makeUpdateAndUnsetObjectWithLookups for ", self.table, 'updateObject:',  updateObject );
@@ -1439,9 +1454,15 @@ var MongoMixin = declare( null, {
     // Make a copy of the original updateObject. The copy will be
     // enriched and will then be returned
     var updateObjectWithLookups = {};
-    for( var k in updateObject ) updateObjectWithLookups[ k ] = updateObject[ k ];
+    for( k in updateObject ){
+      if( !updateObject.hasOwnProperty( k ) ) continue;
+      updateObjectWithLookups[ k ] = updateObject[ k ];
+    }
     var unsetObjectWithLookups = {};
-    for( var k in unsetObject ) unsetObjectWithLookups[ k ] = unsetObject[ k ];
+    for( k in unsetObject ){
+      if( !unsetObject.hasOwnProperty( k ) ) continue;
+      unsetObjectWithLookups[ k ] = unsetObject[ k ];
+    }
 
     // This is only for aesthetic purposes. In an update, the update object
     // "is" the record (although it might be a partial version of it)
@@ -1532,6 +1553,8 @@ var MongoMixin = declare( null, {
 
     var self = this;
 
+    var mongoSelector;
+    
     // The layer is the object from which the call is made
     var layer = this;
 
@@ -1548,9 +1571,9 @@ var MongoMixin = declare( null, {
         consolelog( rnd, "Child table to be considered is of type MULTIPLE" );
 
         // JOIN QUERY (direct)
-        var mongoSelector = {};
+        mongoSelector = {};
         Object.keys( childTableData.nestedParams.join ).forEach( function( joinKey ){
-          var joinValue = childTableData.nestedParams.join[ joinKey ]
+          var joinValue = childTableData.nestedParams.join[ joinKey ];
           mongoSelector[ joinKey ] = record[ joinValue ];
         });
         
@@ -1575,7 +1598,7 @@ var MongoMixin = declare( null, {
         consolelog( rnd, "Child table to be considered is of type LOOKUP" );
 
         // JOIN QUERY (direct)
-        var mongoSelector = {};
+        mongoSelector = {};
         mongoSelector[ childTableData.nestedParams.layerField ] = record[ childTableData.nestedParams.localField ];
 
         consolelog( rnd, "Running the select with selector:", mongoSelector, "on table", childTableData.layer.table );
@@ -1586,7 +1609,7 @@ var MongoMixin = declare( null, {
           if( err ) return cb( err );
 
           // Return null if it's a lookup and there are no results
-          if( res.length == 0 ){
+          if( res.length === 0 ){
             return cb( null, null );
           }
           var r = res[ 0 ];
@@ -1614,7 +1637,10 @@ var MongoMixin = declare( null, {
 
     var self = this;
     var layer = this;
-
+    var selector;
+    var updateObject, unsetObject, relativeUnsetObject, relativeUpdateObject;
+    var id, k, prefix, filters, mongoParameters;
+    
     // Paranoid checks and sane defaults for params
     if( typeof( params ) !== 'object' || params === null ) params = {};
 
@@ -1643,7 +1669,7 @@ var MongoMixin = declare( null, {
         switch( nestedParams.type ){
           case 'multiple': field = self.table; break;
           case 'lookup'  : field = nestedParams.localField; break;
-          default        : return cb( new Error("The options parameter must be a non-null object") ); break;
+          default        : return cb( new Error("type needs to be 'lookup' or 'multiple'") );
         }
         consolelog( "FIELD:", field );
         consolelog( "PARAMETERS:", nestedParams );
@@ -1684,12 +1710,15 @@ var MongoMixin = declare( null, {
 
             // The updateRecord variable is the same as record, but with uc fields and _children added
             var insertRecord = {};
-            for( var k in record ) insertRecord[ k ] = record[ k ];
+            for( k in record ){
+              if( ! record.hasOwnProperty( k ) ) continue;
+              insertRecord[ k ] = record[ k ];
+            }
             self._addUcFields( insertRecord );
             insertRecord._children = {};
 
-            var updateObject = { '$push': {} };
-            updateObject[ '$push' ] [ '_children' + '.' + field ] = { '$each': [ insertRecord ], '$slice': -1000 };
+            updateObject = { '$push': {} };
+            updateObject.$push[ '_children' + '.' + field ] = { '$each': [ insertRecord ], '$slice': -1000 };
 
             consolelog( rnd, "The mongoSelector is:", mongoSelector  );
             consolelog( rnd, "The update object is: ");
@@ -1697,7 +1726,7 @@ var MongoMixin = declare( null, {
 
             parentLayer.collection.update( mongoSelector, updateObject, function( err, total ){
               if( err ) return cb( err );
-
+              if( total === 0 ) return cb( new Error("Record not found while adding entry to child table") );
               consolelog( rnd, "Record inserted in sub-array" );
 
               cb( null );
@@ -1719,24 +1748,26 @@ var MongoMixin = declare( null, {
             consolelog( rnd, "CASE #2 (updateOne)", params.op );
             
             // Assign the parameters
-            var id = params.id;
-            var updateObject = params.updateObject;
-            var unsetObject = params.unsetObject;
+            id = params.id;
+            updateObject = params.updateObject;
+            unsetObject = params.unsetObject;
  
-            var prefix = '_children.' + field + ( nestedParams.type === 'multiple' ?  '.$.' : '.' ) ;
+            prefix = '_children.' + field + ( nestedParams.type === 'multiple' ?  '.$.' : '.' ) ;
 
             // Make up relative update objects based on the original ones,
             // with extra path added
-            var relativeUpdateObject = {};
-            for( var k in updateObject ){
+            relativeUpdateObject = {};
+            for( k in updateObject ){
+              if( !updateObject.hasOwnProperty( k ) ) continue;
               relativeUpdateObject[ prefix + k ] = updateObject[ k ];
             }
-            var relativeUnsetObject = {};
-            for( var k in unsetObject ){
+            relativeUnsetObject = {};
+            for( k in unsetObject ){
+              if( !unsetObject.hasOwnProperty( k ) ) continue;
               relativeUnsetObject[ prefix + k ] = unsetObject[ k ];
             }
 
-            var selector = {};
+            selector = {};
             selector[ '_children.' + field + "." + self.idProperty ] = id;
             selector._clean = true;
             consolelog( rnd, "SELECTOR:" );
@@ -1764,13 +1795,13 @@ var MongoMixin = declare( null, {
             // The rest is untested and untestable code (not till #1243 is solved)
 
             // Assign the parameters
-            var filters = params.filters;
-            var updateObject = params.updateObject;
-            var unsetObject = params.unsetObject;
+            filters = params.filters;
+            updateObject = params.updateObject;
+            unsetObject = params.unsetObject;
 
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
+              mongoParameters = parentLayer._makeMongoParameters( filters, field );
               // var mongoParameters = parentLayer._makeMongoParameters( filters );
             } catch( e ){
               return cb( e );
@@ -1779,23 +1810,28 @@ var MongoMixin = declare( null, {
             consolelog( rnd,  "mongoParameters:" );
             consolelog( mongoParameters.querySelector );
 
-            var prefix = '_children.' + field + ( nestedParams.type === 'multiple' ?  '.$.' : '.' );
+            prefix = '_children.' + field + ( nestedParams.type === 'multiple' ?  '.$.' : '.' );
 
             // Make up relative update objects based on the original ones,
             // with extra path added
-            var relativeUpdateObject = {};
-            for( var k in updateObject ){
+            relativeUpdateObject = {};
+            for( k in updateObject ){
+              if( !updateObject.hasOwnProperty( k ) ) continue;
               relativeUpdateObject[ prefix + k ] = updateObject[ k ];
             }
-            var relativeUnsetObject = {};
-            for( var k in unsetObject ){
+            relativeUnsetObject = {};
+            for( k in unsetObject ){
+              if( !unsetObject.hasOwnProperty( k ) ) continue;
               relativeUnsetObject[ prefix + k ] = unsetObject[ k ];
             }
 
             consolelog( rnd,  "updateObject:" );
             consolelog( relativeUpdateObject );
 
-            parentLayer.collection.update( mongoParameters.querySelector, { $set: relativeUpdateObject, $unset: relativeUnsetObject }, { multi: true }, function( err, total ){
+            parentLayer.collection.update( mongoParameters.querySelector,
+            { $set: relativeUpdateObject, $unset: relativeUnsetObject }, 
+            { multi: true }, 
+            function( err, total ){
             
               if( err ) return cb( err );
               consolelog( rnd, "Updated:", total, "records" );
@@ -1812,26 +1848,26 @@ var MongoMixin = declare( null, {
             consolelog( rnd, "CASE #3 (deleteOne)", params.op );
 
             // Assign the parameters
-            var id = params.id;
+            id = params.id;
 
-            var updateObject = {};
+            updateObject = {};
 
-            var selector = {};
+            selector = {};
             selector[ '_children.' + field + "." + self.idProperty ] = id;
             selector._clean = true;
 
             // It's a lookup field: it will assign an empty object
             if( nestedParams.type === 'lookup' ){
-              updateObject[ '$set' ] = {};
-              updateObject[ '$set'] [ '_children.' + field ] = {};
+              updateObject.$set = {};
+              updateObject.$set[ '_children.' + field ] = {};
 
             // It's a multiple one: it will $pull the element out
             } else {
-              updateObject[ '$pull' ] = {};
+              updateObject.$pull = {};
 
               var pullData = {};
               pullData[ self.idProperty  ] =  id ;
-              updateObject[ '$pull' ] [ '_children.' + field ] = pullData;
+              updateObject.$pull[ '_children.' + field ] = pullData;
             }
 
             consolelog( rnd, "Selector:");
@@ -1854,23 +1890,24 @@ var MongoMixin = declare( null, {
             consolelog( rnd, "CASE #3 (deleteMany)", params.op );
 
             // Assign the parameters
-            var filters = params.filters;
+            filters = params.filters;
 
             consolelog("Making filter...", filters, field );
 
             // Make up parameters from the passed filters
             try {
-              var mongoParameters = parentLayer._makeMongoParameters( filters, field );
+              mongoParameters = parentLayer._makeMongoParameters( filters, field );
             } catch( e ){
               return cb( e );
             }
-            var selector = { $and: [ { _clean: true }, mongoParameters.querySelector ] }
+            selector = { $and: [ { _clean: true }, mongoParameters.querySelector ] };
 
             //console.log("!!!!!!!!!!!!!!!!!!!!!!!!!!!GOT HERE...", selector );
 
             // Make up parameters from the passed filters
+            var mongoParametersForPull;
             try {
-              var mongoParametersForPull = parentLayer._makeMongoParameters( filters, field, true );
+              mongoParametersForPull = parentLayer._makeMongoParameters( filters, field, true );
             } catch( e ){
               return cb( e );
             }
@@ -1879,15 +1916,15 @@ var MongoMixin = declare( null, {
             consolelog("mongoParametersForPull:", mongoParametersForPull );
 
             // The update object will depend on whether it's a push or a pull
-            var updateObject = {};
+            updateObject = {};
 
             // It's a lookup field: it will assign an empty object
             if( nestedParams.type === 'lookup' ){
 
               consolelog("It's a lookup!");
 
-              updateObject[ '$set' ] = {};
-              updateObject[ '$set'] [ '_children.' + field ] = {};
+              updateObject.$set = {};
+              updateObject.$set[ '_children.' + field ] = {};
 
               consolelog("Query Selector:", mongoParameters.querySelector );
               consolelog("Update object:", updateObject );
@@ -1904,8 +1941,8 @@ var MongoMixin = declare( null, {
 
               consolelog("It's a multiple!");
 
-              updateObject[ '$pull' ] = {};
-              updateObject[ '$pull' ] [ '_children.' + field ] = mongoParametersForPull.querySelector;
+              updateObject.$pull = {};
+              updateObject.$pull[ '_children.' + field ] = mongoParametersForPull.querySelector;
 
               consolelog("Query Selector:", mongoParameters.querySelector );
               consolelog("Update object:", updateObject );
@@ -1943,14 +1980,11 @@ var MongoMixin = declare( null, {
 // The default id maker
 MongoMixin.makeId = function( id, cb ){
   if( id === null ){
-    cb( null, ObjectId() );
+    cb( null, makeObjectId() );
   } else {
-    cb( null, ObjectId( id ) );
+    cb( null, makeObjectId( id ) );
   }
 };
 
-debugger;
-
 MongoMixin.registry = {};
 exports = module.exports = MongoMixin;
-
