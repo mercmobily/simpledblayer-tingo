@@ -39,7 +39,7 @@ function _makeOperator( op ){
   };
 }
 
-var MongoMixin = declare( null, {
+var MongoMixin = declare( Object, {
 
   _projectionHash: {},
   _fieldsHash: {},
