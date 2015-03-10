@@ -29,8 +29,6 @@ var SchemaMixin = declare( [ SimpleSchema, SimpleSchemaMongo ] );
 var me = path.dirname( require.resolve( 'simpledblayer' ) );
 var simpledblayerTests = require( me + "/test.js" );
 
-//var simpledblayerTests = require( "./lib/simpledblayer/test.js" );
-
 var tests = simpledblayerTests.get(
 
   function getDbInfo( done ) {
