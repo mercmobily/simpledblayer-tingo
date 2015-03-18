@@ -27,7 +27,8 @@ var makeObjectId = function( id ){
 
 var consolelog = debug( 'simpledblayer:tingo');
 
-var MONGO = false;
+var NEWAPI = false;
+
 
 //Differenciation BW TingoDb and MongoDB starts here
 
@@ -174,13 +175,13 @@ var MongoMixin = declare( Object, {
     var a, aWithPrefix, aIsSearchableAsString, b;
 
     // If there is no condition, return an empty filter
-    if( ! conditions.name ) return {};
+    if( ! conditions.type ) return {};
 
     // Scan filters recursively, making up the mongo query
-    if( conditions.name == 'and' || conditions.name == 'or' ){
+    if( conditions.type == 'and' || conditions.type == 'or' ){
 
       // For 'and', it will return { $and: [ ... ] }
-      var mongoName = '$' + conditions.name;
+      var mongoName = '$' + conditions.type;
 
       // The content of the $and key will be the result of makeMongo
       var r = {};
@@ -193,8 +194,8 @@ var MongoMixin = declare( Object, {
 
       // Otherwise, run the operator encoutered
       // (But, remember to fixup the field name (paths, etc.) and possibly the checked value (uppercase)
-      var operator = this._operators[ conditions.name ];
-      if( ! operator ) throw( new Error( "Could not find operator: " + conditions.name ) );
+      var operator = this._operators[ conditions.type ];
+      if( ! operator ) throw( new Error( "Could not find operator: " + conditions.type ) );
 
       // Save this for later
       a = conditions.args[ 0 ];
@@ -770,12 +771,14 @@ var MongoMixin = declare( Object, {
         // If options.multi is off, then use findAndModify which will return the doc
         if( !options.multi ){
 
-          self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, { $set: updateObjectWithLookups, $unset: unsetObjectWithLookups }, { new: true }, function( err, doc ){
+          var u = { $set: updateObjectWithLookups };
+          if( Object.keys( unsetObjectWithLookups ).length ) u.$unset = unsetObjectWithLookups;
+          self.collection.findAndModify( mongoParameters.querySelector, mongoParameters.sortHash, u, { new: true }, function( err, doc ){
             if( err ) return cb( err );
 
             // Patched for mongo driver 2.0
             // TODO: findAndModify is deprecated, update to a current function AND probably delete this
-            if( MONGO ) doc = doc.value;
+            if( NEWAPI ) doc = doc.value;
 
             if( doc ){
 
@@ -800,10 +803,14 @@ var MongoMixin = declare( Object, {
         } else {
 
           // Run the query
-          self.collection.update( mongoParameters.querySelector, { $set: updateObjectWithLookups, $unset: unsetObjectWithLookups }, { multi: true }, function( err, r ){
+
+          var u = { $set: updateObjectWithLookups };
+          if( Object.keys( unsetObjectWithLookups ).length ) u.$unset = unsetObjectWithLookups;        
+          self.collection.update( mongoParameters.querySelector, u, { multi: true }, function( err, r ){
             if( err ) return cb( err );
 
-            if( MONGO ) var total = r.result.n;
+            if( NEWAPI ) var total = r.result.n;
+            else total = r;
 
             // MONGO: Change parents
             self._updateParentsRecords( { op: 'updateMany', filters: filters, updateObject: updateObject, unsetObject: unsetObject }, function( err ){
@@ -1012,7 +1019,8 @@ var MongoMixin = declare( Object, {
       self.collection.remove( mongoParameters.querySelector, { single: false }, function( err, r ){
         if( err ) return cb( err );
         
-        if( MONGO) var total = r.result.n;
+        if( NEWAPI ) var total = r.result.n;
+        else var total = r;
 
         self.emit( 'deleteMany', conditions, options );
 
@@ -1050,10 +1058,10 @@ var MongoMixin = declare( Object, {
     var id = record[ idProperty ];
 
     // Make up conditionsHash based on the positionBase array
-    //conditionsHash = { name: 'and', args: [] };
+    //conditionsHash = { type: 'and', args: [] };
     //for( var i = 0, l = self.positionBase.length; i < l; i ++ ){
     //  var positionBaseField = self.positionBase[ i ];
-    //  conditionsHash.args.push( { name: 'eq', args: [ positionBaseField, record[ positionBaseField ] ] } );
+    //  conditionsHash.args.push( { type: 'eq', args: [ positionBaseField, record[ positionBaseField ] ] } );
     //  one = true;
     //}
     conditionsHash = {};
@@ -1851,11 +1859,13 @@ var MongoMixin = declare( Object, {
             consolelog( rnd, "SELECTOR:" );
             consolelog( rnd, selector );
 
-            parentLayer.collection.update( selector, { $set: relativeUpdateObject, $unset: relativeUnsetObject }, { multi: true }, function( err, total ){
+            var u = { $set: relativeUpdateObject };
+            if( Object.keys( relativeUnsetObject ).length ) u.$unset = relativeUnsetObject;        
+            parentLayer.collection.update( selector, u, { multi: true }, function( err, total ){
               if( err ) return cb( err );
 
               consolelog( rnd, "Updated:", total, "records" );
-
+              
               return cb( null );
 
             });
@@ -1867,7 +1877,7 @@ var MongoMixin = declare( Object, {
 
             // Sorry, can't. MongoDb bug #1243
             if( nestedParams.type === 'multiple' ){
-              return cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Mongo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is unimplementable") );
+              return cb( new Error("You cannot do a mass update of a table that has a father table with 1:n relationship with it. Ask Mongo people to fix https://jira.mongodb.org/browse/SERVER-1243, or this is un`able") );
             }
 
             // The rest is untested and untestable code (not till #1243 is solved)
@@ -1906,12 +1916,11 @@ var MongoMixin = declare( Object, {
             consolelog( rnd,  "updateObject:" );
             consolelog( relativeUpdateObject );
 
-            parentLayer.collection.update( mongoParameters.querySelector,
-            { $set: relativeUpdateObject, $unset: relativeUnsetObject },
-            { multi: true },
-            function( err, total ){
-
+            var u = { $set: relativeUpdateObject };
+            if( Object.keys( relativeUnsetObject ).length ) u.$unset = relativeUnsetObject;
+            parentLayer.collection.update( mongoParameters.querySelector, u, { multi: true }, function( err, total ){
               if( err ) return cb( err );
+
               consolelog( rnd, "Updated:", total, "records" );
 
               return cb( null );
