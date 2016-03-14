@@ -910,7 +910,7 @@ var MongoMixin = declare( Object, {
                 if( self.positionField ){
                   var where, beforeId;
                   if( ! options.position ){
-                    where = 'last';
+                    where = 'end';
                   } else {
                     where = options.position.where;
                     beforeId = options.position.beforeId;
@@ -1086,8 +1086,8 @@ var MongoMixin = declare( Object, {
 
       // Set 'from' and 'to' depending on parameters
       switch( where ){
-        case 'first':  to = 0; break;
-        case 'last': to = data.length; break;
+        case 'start':  to = 0; break;
+        case 'end': to = data.length; break;
         case 'before':
           data.forEach( function( a, i ){ if( a[ idProperty ].toString() == beforeId.toString() ) to = i; } );
         break;
