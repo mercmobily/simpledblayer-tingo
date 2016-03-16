@@ -19,7 +19,7 @@
   "dependencies": {
     "simpledblayer": "0.3.x",
     "simpledeclare": "0.3.x",
-    "tingodb": "~0.4.4",
+    "tingodb": "~0.4.2",
     "async": "~1.5.2",
     "debug": "~2.2.0"
   },
